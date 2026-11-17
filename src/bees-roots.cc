@@ -806,6 +806,9 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 	const auto refs_list = make_shared<list<ExtentRef>>();
 	bool found_nocow = false;
 	bool check_nocow = true;
+	// Refs in read-only roots, if the btrfs send workaround is enabled
+	list<ExtentRef> ro_refs_list;
+	map<uint64_t, bool> root_ro_cache;
 	for (const auto &i : log_ino.m_iors) {
 		catch_all([&](){
 			if (check_nocow) {
@@ -843,6 +846,17 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 				.m_hold = hold,
 			};
 
+			auto ro_found = root_ro_cache.find(i.m_root);
+			if (ro_found == root_ro_cache.end()) {
+				BEESTRACE("checking root " << i.m_root << " for btrfs send workaround");
+				ro_found = root_ro_cache.insert(make_pair(i.m_root, m_ctx->is_root_ro(i.m_root))).first;
+			}
+			if (ro_found->second) {
+				ro_refs_list.push_back(extref);
+				BEESCOUNT(extent_ref_ro);
+				return; // from the catch_all
+			}
+
 			refs_list->push_back(extref);
 			BEESCOUNT(extent_ref_ok);
 		});
@@ -853,6 +867,16 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 		}
 	}
 	BEESCOUNT(extent_mapped);
+
+	// With the btrfs send workaround, refs in read-only roots can't be dedupe
+	// dst, so don't scan them if there is any ref in a read-write root.
+	// The extent is still a dedupe src through the hash table and resolver.
+	// If all refs are read-only, scan one of them so the extent's blocks
+	// still get into the hash table.
+	if (refs_list->empty() && !ro_refs_list.empty()) {
+		refs_list->push_back(ro_refs_list.front());
+		BEESCOUNT(extent_ref_ro_only);
+	}
 
 	// Don't need to do anything if we found no refs
 	if (refs_list->empty()) {
