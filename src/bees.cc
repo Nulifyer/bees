@@ -745,7 +745,15 @@ wait_for_signals()
 				case SIGTERM:
 				case SIGINT:
 				default:
-					DIE_IF_NON_ZERO(sigprocmask(SIG_BLOCK, &old_sigset, &new_sigset));
+					{
+						// Unblock only SIGTERM and SIGINT.  SIGUSR1/2 stay blocked
+						// because their default action would also kill us.
+						sigset_t die_sigset;
+						DIE_IF_NON_ZERO(sigemptyset(&die_sigset));
+						DIE_IF_NON_ZERO(sigaddset(&die_sigset, SIGTERM));
+						DIE_IF_NON_ZERO(sigaddset(&die_sigset, SIGINT));
+						DIE_IF_NON_ZERO(sigprocmask(SIG_UNBLOCK, &die_sigset, nullptr));
+					}
 					BEESLOGDEBUG("Signal catcher exiting");
 					return;
 			}
