@@ -269,9 +269,20 @@ BeesContext::dedup(const BeesRangePair &brp_in)
 			return rv;
 		} catch (const std::system_error &e) {
 			if (e.code().value() == EAGAIN) {
-				BEESNOTE("dedup waiting for btrfs send on " << brp.second);
-				BEESLOGDEBUG("dedup waiting for btrfs send on " << brp.second);
-				roots()->wait_for_transid(1);
+				// Don't hold the dedupe lock while waiting, or LOGICAL_INO can't run
+				lock.reset();
+				{
+					BEESNOTE("dedup waiting for btrfs send on " << brp.second);
+					BEESLOGDEBUG("dedup waiting for btrfs send on " << brp.second);
+					roots()->wait_for_transid(1);
+				}
+				if (stop_requested()) {
+					BEESLOGDEBUG("dedup abandoned for stop request on " << brp.second);
+					BEESCOUNT(dedup_send_stop);
+					return false;
+				}
+				BEESNOTE("waiting to dedup " << brp);
+				lock = MultiLocker::get_lock("dedupe");
 			} else {
 				throw;
 			}
