@@ -118,6 +118,8 @@ BeesHashTable::flush_dirty_extent(uint64_t extent_index)
 		BEESTOOLONG("pwrite(fd " << m_fd << " '" << name_fd(m_fd)<< "', length " << to_hex(dirty_extent_end - dirty_extent) << ", offset " << to_hex(dirty_extent - m_byte_ptr) << ")");
 		// Copy the extent because we might be stuck writing for a while
 		ByteVector extent_copy(dirty_extent, dirty_extent_end);
+		// Remember which version of the extent we copied
+		const auto saved_dirty_gen = m_extent_metadata.at(extent_index).m_dirty_gen;
 
 		// Release the lock
 		lock.unlock();
@@ -130,9 +132,15 @@ BeesHashTable::flush_dirty_extent(uint64_t extent_index)
 		// const size_t dirty_extent_size   = dirty_extent_end - dirty_extent;
 		// bees_unreadahead(m_fd, dirty_extent_offset, dirty_extent_size);
 
-		// Mark extent clean if write was successful
+		// Mark extent clean if write was successful, but only if
+		// nothing modified the extent while we were writing the copy.
+		// If something did, leave it dirty for the next flush.
 		lock.lock();
-		m_extent_metadata.at(extent_index).m_dirty = false;
+		if (m_extent_metadata.at(extent_index).m_dirty_gen == saved_dirty_gen) {
+			m_extent_metadata.at(extent_index).m_dirty = false;
+		} else {
+			BEESCOUNT(hash_extent_redirty);
+		}
 
 		wrote_extent = true;
 	});
@@ -177,6 +185,7 @@ BeesHashTable::set_extent_dirty_locked(uint64_t extent_index)
 {
 	// Must already be locked
 	m_extent_metadata.at(extent_index).m_dirty = true;
+	++m_extent_metadata.at(extent_index).m_dirty_gen;
 
 	// Signal writeback thread
 	unique_lock<mutex> dirty_lock(m_dirty_mutex);

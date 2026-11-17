@@ -480,6 +480,7 @@ private:
 	struct ExtentMetaData {
 		shared_ptr<mutex> m_mutex_ptr;		// Access serializer
 		bool	m_dirty = false;	// Needs to be written back to disk
+		uint64_t m_dirty_gen = 0;	// Incremented every time the extent is marked dirty
 		bool	m_missing = true;	// Needs to be read from disk
 		ExtentMetaData();
 	};
