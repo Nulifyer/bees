@@ -799,16 +799,19 @@ bees_main(int argc, char *argv[])
 	unsigned thread_min = 0;
 	double load_target = 0;
 	bool workaround_btrfs_send = false;
+	bool keep_prealloc = false;
 	BeesRoots::ScanMode root_scan_mode = BeesRoots::SCAN_MODE_EXTENT;
 
 	// Configure getopt_long
 	// Options with no short form
 	enum {
 		BEES_OPT_THROTTLE_FACTOR = 256,
+		BEES_OPT_KEEP_PREALLOC,
 	};
 	static const struct option long_options[] = {
 		{ .name = "thread-factor",         .has_arg = required_argument, .val = 'C' },
 		{ .name = "throttle-factor",       .has_arg = required_argument, .val = BEES_OPT_THROTTLE_FACTOR },
+		{ .name = "keep-prealloc",         .has_arg = no_argument,       .val = BEES_OPT_KEEP_PREALLOC },
 		{ .name = "thread-min",            .has_arg = required_argument, .val = 'G' },
 		{ .name = "strip-paths",           .has_arg = no_argument,       .val = 'P' },
 		{ .name = "no-timestamps",         .has_arg = no_argument,       .val = 'T' },
@@ -859,6 +862,9 @@ bees_main(int argc, char *argv[])
 				break;
 			case BEES_OPT_THROTTLE_FACTOR:
 				bees_throttle_factor = stod(optarg);
+				break;
+			case BEES_OPT_KEEP_PREALLOC:
+				keep_prealloc = true;
 				break;
 			case 'G':
 				thread_min = stoul(optarg);
@@ -959,6 +965,9 @@ bees_main(int argc, char *argv[])
 
 	// Workaround for btrfs send
 	bc->roots()->set_workaround_btrfs_send(workaround_btrfs_send);
+
+	// Keep or replace prealloc extents
+	bc->set_keep_prealloc(keep_prealloc);
 
 	// Set root scan mode
 	bc->roots()->set_scan_mode(root_scan_mode);

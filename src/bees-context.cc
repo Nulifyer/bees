@@ -395,6 +395,13 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 		return;
 	}
 
+	if ((e.flags() & Extent::PREALLOC) && m_ctx->m_keep_prealloc) {
+		// Leave prealloc alone so the space reservation is kept.
+		// Prealloc is all zero, so there is nothing to hash or dedupe either.
+		BEESCOUNT(scan_prealloc_kept);
+		return;
+	}
+
 	if (e.flags() & Extent::PREALLOC) {
 		// Prealloc is all zero and we replace it with a hole.
 		// No special handling is required here.  Nuke it and move on.
@@ -1319,4 +1326,15 @@ BeesContext::set_root_path(string path)
 	BEESLOGINFO("set_root_path " << path);
 	m_root_path = path;
 	set_root_fd(open_or_die(m_root_path, FLAGS_OPEN_DIR));
+}
+
+void
+BeesContext::set_keep_prealloc(bool keep)
+{
+	m_keep_prealloc = keep;
+	if (m_keep_prealloc) {
+		BEESLOGINFO("keeping prealloc extents");
+	} else {
+		BEESLOGINFO("replacing prealloc extents with holes");
+	}
 }

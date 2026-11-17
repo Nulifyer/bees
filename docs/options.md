@@ -80,6 +80,23 @@
  For details of the different scanning modes and the default value of
  this option, see [bees configuration](config.md).
 
+## Extent handling options
+
+* `--keep-prealloc`
+
+ Leave preallocated (`PREALLOC`, e.g. from `fallocate`) extents alone.
+
+ By default, bees replaces each preallocated extent inside EOF with a
+hole.  Reads still return zeros, but the space reservation is gone, so
+an application that preallocated space to guarantee it can later write
+there (for example a thick-provisioned VM disk image, or a database)
+may get `ENOSPC` when the filesystem is full.
+
+ With this option, bees skips preallocated extents entirely: it does not
+punch holes in them, hash them or dedupe them.  Extents that contain
+written zeros are not preallocated extents, and are still handled as
+usual.
+
 ## Workarounds
 
 * `--workaround-btrfs-send` or `-a`

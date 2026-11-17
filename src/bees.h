@@ -771,6 +771,8 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 	mutex						m_progress_mtx;
 	string						m_progress_str;
 
+	bool						m_keep_prealloc = false;
+
 	void set_root_fd(Fd fd);
 
 	BeesResolveAddrResult resolve_addr_uncached(BeesAddress addr);
@@ -781,6 +783,7 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 public:
 
 	void set_root_path(string path);
+	void set_keep_prealloc(bool keep);
 
 	Fd root_fd() const { return m_root_fd; }
 	Fd home_fd();

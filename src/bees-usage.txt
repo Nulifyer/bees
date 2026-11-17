@@ -18,6 +18,10 @@ Load management options:
 Filesystem tree traversal options:
     -m, --scan-mode       Scanning mode (0..4, default 4)
 
+Extent handling options:
+        --keep-prealloc   Leave preallocated extents alone
+                          (default: replace them with holes)
+
 Workarounds:
     -a, --workaround-btrfs-send    Workaround for btrfs send
                                    (ignore RO snapshots)
