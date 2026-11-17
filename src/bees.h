@@ -15,6 +15,7 @@
 #include "crucible/time.h"
 #include "crucible/task.h"
 
+#include <atomic>
 #include <functional>
 #include <list>
 #include <mutex>
@@ -464,7 +465,7 @@ private:
 	BeesStringFile		m_stats_file;
 
 	// Prefetch readahead hint
-	bool			m_prefetch_running = false;
+	atomic<bool>		m_prefetch_running{false};
 
 	// Mutex/condvar for the writeback thread
 	mutex			m_dirty_mutex;
@@ -474,7 +475,7 @@ private:
 	// Mutex/condvar to stop
 	mutex			m_stop_mutex;
 	condition_variable	m_stop_condvar;
-	bool			m_stop_requested = false;
+	atomic<bool>		m_stop_requested{false};
 
 	// Per-extent structures
 	struct ExtentMetaData {
@@ -525,8 +526,8 @@ class BeesCrawl {
 
 	mutex					m_mutex;
 	BtrfsTreeItem				m_next_extent_data;
-	bool					m_deferred = false;
-	bool					m_finished = false;
+	atomic<bool>				m_deferred{false};
+	atomic<bool>				m_finished{false};
 
 	mutex					m_state_mutex;
 	ProgressTracker<BeesCrawlState>		m_state;
@@ -576,7 +577,7 @@ class BeesRoots : public enable_shared_from_this<BeesRoots> {
 
 	mutex					m_stop_mutex;
 	condition_variable			m_stop_condvar;
-	bool					m_stop_requested = false;
+	atomic<bool>				m_stop_requested{false};
 
 	CrawlMap insert_new_crawl();
 	Fd open_root_nocache(uint64_t root);

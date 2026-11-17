@@ -699,7 +699,7 @@ static
 bool
 should_throttle()
 {
-	static bool s_throttled = false;
+	static atomic<bool> s_throttled(false);
 	// If there's too many entries in the queue, stop adding new ones until workers catch up
 	// If there's not too many entries in the queue, restart the scan task
 	const auto instance_count = Task::instance_count();

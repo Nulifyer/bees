@@ -348,7 +348,7 @@ BeesHashTable::prefetch_loop()
 		graph_blob << "Kernel:  " << uname.sysname << " " << uname.release << " " << uname.machine << " " << uname.version << "\n";
 
 		graph_blob
-			<< "\nHash table page occupancy histogram (" << occupied_count << "/" << total_count << " cells occupied, " << (occupied_count * 100 / total_count) << "%)\n"
+			<< "\nHash table page occupancy histogram (" << occupied_count << "/" << total_count << " cells occupied, " << percent(occupied_count, total_count) << ")\n"
 			<< out.str() << "0%      |      25%      |      50%      |      75%      |   100% page fill\n"
 			<< "compressed " << compressed_count << " (" << percent(compressed_count, occupied_count) << ")\n"
 			<< "uncompressed " << uncompressed_count << " (" << percent(uncompressed_count, occupied_count) << ")"
