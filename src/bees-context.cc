@@ -697,7 +697,7 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 			if (j.second.begin() > i.second.begin() && j.second.end() < i.second.end()) {
 				auto other_i = i;
 				const auto end_left_delta = i.second.end() - j.second.begin();
-				const auto begin_right_delta = i.second.begin() - j.second.end();
+				const auto begin_right_delta = j.second.end() - i.second.begin();
 				i.shrink_end(end_left_delta);
 				other_i.shrink_begin(begin_right_delta);
 				dedupe_list.push_back(other_i);
