@@ -523,7 +523,7 @@ BeesRangePair::grow(shared_ptr<BeesContext> ctx, bool constrained)
 		}
 
 		// Source block cannot be zero in a non-compressed non-magic extent
-		BeesAddress first_addr(first.fd(), new_first.begin());
+		BeesAddress first_addr(first.fd(), first.end());
 		if (first_bbd.is_data_zero() && !first_addr.is_magic() && !first_addr.is_compressed()) {
 			BEESCOUNT(pairforward_zero);
 			break;
