@@ -1,4 +1,5 @@
 #include "bees.h"
+#include "bees-extent-ref-order.h"
 
 #include "crucible/btrfs-tree.h"
 #include "crucible/cache.h"
@@ -860,18 +861,7 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 	}
 
 	// Sort list in sane read/search order
-	refs_list->sort([](const ExtentRef &a, const ExtentRef &b) {
-		// Sort by inode first to avoid thrashing inode locks
-		if (a.m_inum < b.m_inum) return -1;
-		if (a.m_inum > b.m_inum) return 1;
-		// Do all the reflinks on one subvol at a time so that we don't have a lot of open trees
-		if (a.m_root < b.m_root) return -1;
-		if (a.m_root > b.m_root) return 1;
-		// Logically sequential read order because that's what both scan_one_extent and btrfs are optimized for
-		if (a.m_offset < b.m_offset) return -1;
-		if (a.m_offset > b.m_offset) return 1;
-		return 0;
-	});
+	refs_list->sort(bees_extent_ref_less<ExtentRef>);
 
 	// Create task to scan all refs to this extent
 	ostringstream oss;

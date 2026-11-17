@@ -1,6 +1,7 @@
 PROGRAMS = \
 	chatter \
 	crc64 \
+	extent_ref_order \
 	fd \
 	limits \
 	namedptr \
