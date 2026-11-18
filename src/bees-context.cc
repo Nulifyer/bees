@@ -360,8 +360,11 @@ BeesContext::dup_extent(const BeesFileRange &src, const shared_ptr<BeesTempFile>
 	return BeesRangePair(tmpfile->make_copy(src), src);
 }
 
+/// Replace the data of bfr with a copy in a new extent, and insert the
+/// copy's hashes.  `scanned` has what the scan of the old extent found for
+/// each block, by file offset.
 void
-BeesContext::rewrite_file_range(const BeesFileRange &bfr)
+BeesContext::rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesHashTable::ScannedBlock> &scanned)
 {
 	auto m_ctx = shared_from_this();
 	BEESNOTE("Rewriting bfr " << bfr);
@@ -386,6 +389,7 @@ BeesContext::rewrite_file_range(const BeesFileRange &bfr)
 	// interim solution while we wait for tree-2 extent scanning.
 	auto hash_table = m_ctx->hash_table();
 	BtrfsExtentWalker ew(bfr.fd(), bfr.begin(), root_fd());
+	vector<BeesHashTable::ScannedBlock> copied_blocks;
 	for (off_t next_p = bfr.begin(); next_p < bfr.end(); ) {
 		off_t p = next_p;
 		next_p += BLOCK_SIZE_SUMS;
@@ -396,9 +400,31 @@ BeesContext::rewrite_file_range(const BeesFileRange &bfr)
 		BeesAddress addr(e, p);
 		bbd.addr(addr);
 		if (!addr.is_magic() && !bbd.is_data_zero()) {
-			hash_table->push_random_hash_addr(bbd.hash(), bbd.addr());
-			BEESCOUNT(scan_reinsert);
+			BeesHashTable::ScannedBlock block {
+				.m_hash = bbd.hash(),
+				.m_addr = bbd.addr(),
+				.m_looked_up = false,
+				.m_seen = {},
+			};
+			// The scan looked this block up before it was copied, and found no duplicate
+			const auto found = scanned.find(p);
+			if (found != scanned.end() && found->second.m_looked_up && found->second.m_hash == block.m_hash) {
+				block.m_looked_up = true;
+				block.m_seen = found->second.m_seen;
+			}
+			copied_blocks.push_back(block);
 		}
+	}
+	// The same race as at the end of scan_one_extent_once: another worker may have
+	// inserted these hashes since the scan looked them up, because it was scanning
+	// (and maybe copying) the same data at the same time.  Then leave our copy out
+	// of the hash table.  The copy is a new extent, so the crawl scans it in its
+	// next cycle, finds the other worker's copy and dedupes the two.  If we inserted
+	// our hashes now, that scan would find them and take the extent for done.
+	if (hash_table->insert_scanned_extent(copied_blocks, false)) {
+		BEESCOUNTADD(scan_reinsert, copied_blocks.size());
+	} else {
+		BEESCOUNT(scan_race_reinsert);
 	}
 }
 
@@ -423,6 +449,10 @@ operator<<(ostream &os, const BeesSeenRange &tup)
 	return os << "BeesSeenRange { " << to_hex(tup.bytenr) << ", " << to_hex(tup.offset) << "+" << pretty(tup.length) << " }";
 }
 
+// Extents that were read and inserted into the hash table recently
+static mutex s_seen_mutex;
+static set<BeesSeenRange> s_seen;
+
 void
 BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 {
@@ -433,12 +463,8 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 	BEESTRACE("scan bfr " << bfr);
 	BEESCOUNT(scan_extent);
 
-	Timer one_timer;
-
 	// We keep moving this method around
 	auto m_ctx = shared_from_this();
-
-	shared_ptr<BeesHashTable> hash_table = m_ctx->hash_table();
 
 	if (e.flags() & ~(
 		FIEMAP_EXTENT_ENCODED | FIEMAP_EXTENT_UNKNOWN |
@@ -487,14 +513,12 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 	}
 
 	// If we already read this extent and inserted it into the hash table, no need to read it again
-	static mutex s_seen_mutex;
 	unique_lock<mutex> lock_seen(s_seen_mutex);
 	const BeesSeenRange tup = {
 		.bytenr = e.bytenr(),
 		.offset = e.offset(),
 		.length = e.size(),
 	};
-	static set<BeesSeenRange> s_seen;
 	if (s_seen.size() > BEES_MAX_EXTENT_REF_COUNT) {
 		s_seen.clear();
 		BEESCOUNT(scan_seen_clear);
@@ -509,7 +533,34 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 	}
 	lock_seen.unlock();
 
-	map<off_t, pair<BeesHash, BeesAddress>> insert_map;
+	// Scan the extent.  If another worker inserted the same hashes into the
+	// hash table between our lookups and our insert, it was scanning a copy
+	// of this data at the same time and neither of us found the other: scan
+	// again, now that its hashes are there to be found.  The extent is not in
+	// s_seen until a scan has inserted it, so nothing needs to be bypassed.
+	for (unsigned rescans = 0; scan_one_extent_once(bfr, e, rescans < BEES_SCAN_RACE_RESCANS); ++rescans) {
+		BEESCOUNT(scan_race_rescan);
+	}
+}
+
+/// Scan an extent that scan_one_extent decided to read.  Returns true if the
+/// extent has to be scanned again because another worker inserted its hashes
+/// first (only if rescan_if_raced).
+bool
+BeesContext::scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, const bool rescan_if_raced)
+{
+	BEESTRACE("scan extent once " << e);
+	Timer one_timer;
+	auto m_ctx = shared_from_this();
+	shared_ptr<BeesHashTable> hash_table = m_ctx->hash_table();
+	const BeesSeenRange tup = {
+		.bytenr = e.bytenr(),
+		.offset = e.offset(),
+		.length = e.size(),
+	};
+
+	// Blocks to insert if we keep the extent, with what the lookup of each one's hash found
+	map<off_t, BeesHashTable::ScannedBlock> insert_map;
 	set<off_t> dedupe_set;
 	set<off_t> zero_set;
 
@@ -557,7 +608,12 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 		// Schedule this block for insertion if we decide to keep this extent.
 		BEESCOUNT(scan_hash_preinsert);
 		BEESTRACE("Pushing hash " << hash << " addr " << addr << " bbd " << bbd);
-		insert_map.insert(make_pair(p, make_pair(hash, addr)));
+		auto &scanned_block = insert_map.insert(make_pair(p, BeesHashTable::ScannedBlock {
+			.m_hash = hash,
+			.m_addr = addr,
+			.m_looked_up = false,
+			.m_seen = {},
+		})).first->second;
 		bar.at(bar_p) = 'i';
 
 		// Ensure we fill in the entire insert_map without skipping any non-zero blocks
@@ -566,6 +622,12 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 		BEESNOTE("lookup hash " << bbd);
 		const auto found = hash_table->find_cell(hash);
 		BEESCOUNT(scan_lookup);
+
+		// Remember what was there, so the insert can tell if anything was added since
+		scanned_block.m_looked_up = true;
+		for (const auto &i : found) {
+			scanned_block.m_seen.push_back(i.e_addr);
+		}
 
 		set<BeesAddress> found_addrs;
 		list<BeesAddress> ordered_addrs;
@@ -595,7 +657,7 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 				// when bees is interrupted.
 				// BEESLOGDEBUG("Found matching hash " << hash << " at same address " << addr << ", skipping " << bfr);
 				BEESCOUNT(scan_already);
-				return;
+				return false;
 			}
 
 			// Address is a duplicate.
@@ -618,7 +680,7 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 				// Extents may become non-toxic so give them a chance to expire.
 				// hash_table->push_front_hash_addr(hash, found_addr);
 				BEESCOUNT(scan_toxic_hash);
-				return;
+				return false;
 			}
 
 			// Put this address in the list without changing hash table order
@@ -641,7 +703,7 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 				// It has become toxic since it was inserted into the hash table.
 				found_addr.set_toxic();
 				hash_table->push_front_hash_addr(hash, found_addr);
-				return;
+				return false;
 			} else if (!resolved.count()) {
 				BEESCOUNT(scan_resolve_zero);
 				// Didn't find a block at the table address, address is dead
@@ -883,14 +945,14 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 			BEESCOUNT(replacedst_dedup_miss);
 			// User data changed while we were looking up the extent, or we have a bug.
 			// We can't fix this, but we can immediately stop wasting effort.
-			return;
+			return false;
 		}
 	}
 
 	// Then the copy/rewrites
 	for (const auto &i : copy_list) {
 		if (!force_insert) {
-			rewrite_file_range(i);
+			rewrite_file_range(i, insert_map);
 			extent_modified = true;
 		}
 		for (auto p = i.begin(); p < i.end(); p += BLOCK_SIZE_SUMS) {
@@ -918,8 +980,22 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 	if (!extent_modified) {
 		// We did not rewrite the extent and it contained data, so insert it.
 		// BEESLOGDEBUG("Inserting " << insert_map.size() << " hashes from " << bfr);
+		vector<BeesHashTable::ScannedBlock> scanned_blocks;
+		scanned_blocks.reserve(insert_map.size());
+		for (auto &i : insert_map) {
+			scanned_blocks.push_back(move(i.second));
+		}
+		// All or none.  None if another worker got in first with one of our hashes.
+		if (!hash_table->insert_scanned_extent(scanned_blocks, false)) {
+			if (rescan_if_raced) {
+				BEESLOGDEBUG("Hashes of " << to_hex(e.bytenr()) << " were inserted by another scan, scanning again " << bfr);
+				return true;
+			}
+			// We have scanned this extent often enough
+			BEESCOUNT(scan_race_giveup);
+			hash_table->insert_scanned_extent(scanned_blocks, true);
+		}
 		for (const auto &i : insert_map) {
-			hash_table->push_random_hash_addr(i.second.first, i.second.second);
 			off_t bar_p = (i.first - e.begin()) / BLOCK_SIZE_SUMS;
 			if (bar.at(bar_p) == 'i') {
 				bar.at(bar_p) = '.';
@@ -945,7 +1021,7 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 
 	// Put this extent into the recently seen list if we didn't rewrite it,
 	// and remove it if we did.
-	lock_seen.lock();
+	unique_lock<mutex> lock_seen(s_seen_mutex);
 	if (extent_modified) {
 		s_seen.erase(tup);
 		BEESCOUNT(scan_seen_erase);
@@ -958,6 +1034,8 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 
 	// Now causes 75% loss of performance in benchmarks
 	// bees_unreadahead(bfr.fd(), bfr.begin(), bfr.size());
+
+	return false;
 }
 
 shared_ptr<Exclusion>

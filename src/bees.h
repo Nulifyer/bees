@@ -127,6 +127,11 @@ const double BEES_SETTLE_PATIENCE = 10.0;
 // their files to stop changing.  Extents beyond that are scanned without waiting.
 const size_t BEES_SETTLE_DEFER_LIMIT = 1000;
 
+// When a worker finds that another worker inserted the hashes of the extent
+// it has just scanned (see bees-insert-race.h), it scans the extent again,
+// at most this many times
+const unsigned BEES_SCAN_RACE_RESCANS = 2;
+
 // Flags
 const int FLAGS_OPEN_COMMON   = O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOATIME | O_LARGEFILE | O_NOCTTY;
 const int FLAGS_OPEN_DIR      = FLAGS_OPEN_COMMON | O_RDONLY | O_DIRECTORY;  ///< Open a directory read-only.
@@ -446,7 +451,24 @@ public:
 	void stop_request();
 	void stop_wait();
 
+	/// One block of an extent that was scanned and kept
+	struct ScannedBlock {
+		HashType		m_hash;
+		AddrType		m_addr;
+		/// The scan looked this hash up.  It does not for blocks
+		/// inside a range that an earlier block already matched.
+		bool			m_looked_up;
+		/// The addresses that lookup returned
+		vector<AddrType>	m_seen;
+	};
+
 	vector<Cell>	find_cell(HashType hash);
+	/// Insert the hashes of one scanned extent with push_random_hash_addr,
+	/// all or none: if the table holds one of the looked-up hashes at an
+	/// address the scan has not seen, another worker inserted it after
+	/// our lookup; then insert nothing and return false, unless
+	/// even_if_raced (see bees-insert-race.h).
+	bool		insert_scanned_extent(const vector<ScannedBlock> &blocks, bool even_if_raced);
 	bool		push_random_hash_addr(HashType hash, AddrType addr);
 	void		erase_hash_addr(HashType hash, AddrType addr);
 	bool		push_front_hash_addr(HashType hash, AddrType addr);
@@ -481,6 +503,9 @@ private:
 	// Prefetch readahead hint
 	atomic<bool>		m_prefetch_running{false};
 
+	// One worker at a time checks and inserts the hashes of a scanned extent
+	mutex			m_insert_mutex;
+
 	// Mutex/condvar for the writeback thread
 	mutex			m_dirty_mutex;
 	condition_variable	m_dirty_condvar;
@@ -510,6 +535,7 @@ private:
 	void fetch_missing_extent_by_hash(HashType hash);
 	void fetch_missing_extent_by_index(uint64_t extent_index);
 	void set_extent_dirty_locked(uint64_t extent_index);
+	bool scanned_block_raced(const ScannedBlock &block);
 	size_t flush_dirty_extents(bool slowly);
 
 	size_t			hash_to_extent_index(HashType ht);
@@ -823,7 +849,8 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 	BeesResolveAddrResult resolve_addr_uncached(BeesAddress addr);
 
 	void scan_one_extent(const BeesFileRange &bfr, const Extent &e);
-	void rewrite_file_range(const BeesFileRange &bfr);
+	bool scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, bool rescan_if_raced);
+	void rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesHashTable::ScannedBlock> &scanned);
 
 public:
 

@@ -4,6 +4,7 @@ PROGRAMS = \
 	extent_data_refs \
 	extent_ref_order \
 	fd \
+	insert_race \
 	limits \
 	namedptr \
 	path \

@@ -1,5 +1,7 @@
 #include "bees.h"
 
+#include "bees-insert-race.h"
+
 #include "crucible/city.h"
 #include "crucible/crc64.h"
 #include "crucible/string.h"
@@ -717,6 +719,33 @@ ret:
 	(void)case_cond;
 #endif
 	return found;
+}
+
+bool
+BeesHashTable::scanned_block_raced(const ScannedBlock &block)
+{
+	if (!block.m_looked_up) {
+		return false;
+	}
+	fetch_missing_extent_by_hash(block.m_hash);
+	auto lock = lock_extent_by_hash(block.m_hash);
+	const auto er = get_cell_range(block.m_hash);
+	return bees_hash_at_unseen_addr(er.first, er.second, block.m_hash, BeesAddress(block.m_addr).get_physical_or_zero(), block.m_seen, [](const AddrType addr) {
+		return BeesAddress(addr).get_physical_or_zero();
+	});
+}
+
+bool
+BeesHashTable::insert_scanned_extent(const vector<ScannedBlock> &blocks, const bool even_if_raced)
+{
+	struct Table {
+		BeesHashTable	&m_table;
+		bool		m_check;
+		bool raced(const ScannedBlock &block) { return m_check && m_table.scanned_block_raced(block); }
+		void insert(const ScannedBlock &block) { m_table.push_random_hash_addr(block.m_hash, block.m_addr); }
+	} table { *this, !even_if_raced };
+	BEESTOOLONG("insert_scanned_extent " << blocks.size() << " blocks");
+	return bees_insert_unless_raced(m_insert_mutex, table, blocks);
 }
 
 void
