@@ -105,6 +105,14 @@ flush and lock them.  With a settle delay:
   * bees scans only up to the newest transid that it saw committed at
     least `SECONDS` ago.  Data that is deleted or overwritten before it
     is that old is never looked up, opened or read.
+  * In scan mode 4 (extent), an extent that is old enough is still put
+    aside when one of its files was changed (ctime or mtime) less than
+    `SECONDS` ago, e.g. a log that is being appended to, a download or
+    a VM image.  bees looks at it again when the file has been left
+    alone for `SECONDS`.  A file that never stops changing is scanned
+    anyway after 10 times `SECONDS`, and no more than 1000 extents per
+    size tier wait like this; any more are scanned without waiting.
+    The other scan modes only have the first rule.
 
  Nothing is skipped because of the delay, only postponed: the crawl
 position saved in `beescrawl.dat` never moves past data that is still

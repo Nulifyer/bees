@@ -119,6 +119,14 @@ const double BEES_HASH_TABLE_ANALYZE_INTERVAL = BEES_STATS_INTERVAL;
 // Wait at least this long for a new transid
 const double BEES_TRANSID_POLL_INTERVAL = 30.0;
 
+// With --settle-delay: an extent whose file keeps changing is scanned anyway
+// after this many settle delays, so it can't hold the crawl position forever
+const double BEES_SETTLE_PATIENCE = 10.0;
+
+// With --settle-delay: maximum number of extents per size tier waiting for
+// their files to stop changing.  Extents beyond that are scanned without waiting.
+const size_t BEES_SETTLE_DEFER_LIMIT = 1000;
+
 // Workaround for silly dedupe / ineffective readahead behavior
 const size_t BEES_READAHEAD_SIZE = 1024 * 1024;
 
@@ -585,6 +593,11 @@ class BeesRoots : public enable_shared_from_this<BeesRoots> {
 	double					m_settle_delay = 0;
 	mutex					m_settle_mutex;
 	BeesSettleHistory			m_settle_history;
+	/// Clock time when the scanner wants to run again without a new transid, 0 for never
+	double					m_settle_retry = 0;
+	/// The crawl thread sleeps on this one, so that waking it doesn't wake crawl_writeback
+	condition_variable			m_crawl_condvar;
+	bool					m_crawl_wake = false;
 
 	shared_ptr<BeesScanMode>		m_scanner;
 
@@ -654,6 +667,10 @@ public:
 	/// Newest transid a crawl may include: transid_max() without a settle delay,
 	/// otherwise the newest transid that is at least that old (0 if none is yet).
 	uint64_t transid_scan_max();
+
+	/// Ask the crawl thread to run the scanner again in this many seconds
+	/// even if no transid settles before then
+	void settle_retry_after(double seconds);
 
 	/// A crawl found an extent to scan, or finished one: the crawl state is worth saving
 	void crawl_state_set_work();

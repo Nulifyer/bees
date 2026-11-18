@@ -126,6 +126,7 @@ The `crawl` event group consists of operations related to scanning btrfs trees t
  * `crawl_discard_low`: An extent that was too small for the crawler's size tier was discarded.
  * `crawl_empty`: A `TREE_SEARCH_V2` ioctl call failed or returned an empty set (usually because all data in the subvol was scanned).
  * `crawl_extent`: The extent crawler queued all references to an extent for processing.
+ * `crawl_extent_settle_retry`: An extent that was put aside because of `--settle-delay` was looked at again.
  * `crawl_fail`: A `TREE_SEARCH_V2` ioctl call failed.
  * `crawl_flop`: Small extent items were not skipped because the next extent started at or before the end of the previous extent.
  * `crawl_gen_high`: An extent item in the search results refers to an extent that is newer than the current crawl's `max_transid` allows.
@@ -187,6 +188,8 @@ The `extent` event group consists of events that occur within the extent scanner
  * `extent_ref_ok`: One extent reference was queued for scanning.
  * `extent_restart`: An extent reference was requeued to be scanned again after an active extent lock is released.
  * `extent_retry`: An extent reference was requeued to be scanned again after an active inode lock is released.
+ * `extent_settle_defer`: An extent was put aside because one of its files was changed less than `--settle-delay` ago.
+ * `extent_settle_giveup`: An extent was scanned although one of its files was changed less than `--settle-delay` ago, because it had waited ten times the delay or too many extents were waiting.
  * `extent_skip`: A 4K extent with more than 1000 refs was skipped.
  * `extent_zero`: An ioctl call to `LOGICAL_INO` succeeded, but reported an empty list of extents.
 

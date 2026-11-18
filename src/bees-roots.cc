@@ -548,6 +548,19 @@ friend ostream& operator<<(ostream &os, const BeesScanModeExtent::MagicCrawl& ma
 	};
 friend ostream& operator<<(ostream &os, const BeesScanModeExtent::ExtentRef& todo);
 
+	/// An extent whose files changed less than the settle delay ago.
+	/// It is mapped again later; until then m_hold keeps the saved
+	/// crawl position behind it.
+	struct SettleDeferred {
+		uint64_t m_bytenr;
+		uint64_t m_length;
+		ProgressTracker<BeesCrawlState>::ProgressHolder m_hold;
+		/// settle_clock() when the extent was first deferred
+		double m_since;
+		/// settle_clock() when to look at it again
+		double m_retry;
+	};
+
 	struct ExtentSizeCount {
 		uint64_t m_bytes = 0;
 	};
@@ -564,13 +577,18 @@ friend ostream& operator<<(ostream &os, const BeesScanModeExtent::ExtentRef& tod
 		MagicCrawl m_size_range;
 		Task m_scan_task;
 		BtrfsDataExtentTreeFetcher m_fetcher;
+		mutex m_settle_mutex;
+		list<SettleDeferred> m_settle_deferred;
+
+		bool settle_defer(uint64_t bytenr, uint64_t len, const ProgressTracker<BeesCrawlState>::ProgressHolder &hold, double deferred_since, double retry_after);
 
 	public:
 		SizeTier(const shared_ptr<BeesScanModeExtent> &bsme, const uint64_t subvol, const MagicCrawl &size_range);
 		void set_crawl_and_task(const shared_ptr<BeesCrawl> &crawl);
 		void run_task();
 		bool find_next_extent();
-		void create_extent_map(const uint64_t bytenr, const ProgressTracker<BeesCrawlState>::ProgressHolder& m_hold, uint64_t len, const Task &again);
+		void create_extent_map(const uint64_t bytenr, const ProgressTracker<BeesCrawlState>::ProgressHolder& m_hold, uint64_t len, const Task &again, double deferred_since = 0);
+		double settle_retry();
 		bool scan_one_ref(const ExtentRef &bior);
 		shared_ptr<BeesCrawl> crawl() const;
 	};
@@ -758,8 +776,68 @@ BeesScanModeExtent::SizeTier::scan_one_ref(const BeesScanModeExtent::ExtentRef &
 	return restart_task;
 }
 
+bool
+BeesScanModeExtent::SizeTier::settle_defer(const uint64_t bytenr, const uint64_t len, const ProgressTracker<BeesCrawlState>::ProgressHolder &hold, const double deferred_since, const double retry_after)
+{
+	const auto roots = m_bsme->m_roots;
+	const double now = settle_clock();
+	const double since = deferred_since > 0 ? deferred_since : now;
+	// A file that never stops changing must not hold the crawl position forever
+	if (now - since >= roots->settle_delay() * BEES_SETTLE_PATIENCE) {
+		return false;
+	}
+	unique_lock<mutex> lock(m_settle_mutex);
+	if (m_settle_deferred.size() >= BEES_SETTLE_DEFER_LIMIT) {
+		return false;
+	}
+	m_settle_deferred.push_back(SettleDeferred {
+		.m_bytenr = bytenr,
+		.m_length = len,
+		.m_hold = hold,
+		.m_since = since,
+		.m_retry = now + retry_after,
+	});
+	lock.unlock();
+	roots->settle_retry_after(retry_after);
+	return true;
+}
+
+/// Map the deferred extents that are due again.  Returns the number of seconds
+/// until the next one is due, or a negative number if none are waiting.
+double
+BeesScanModeExtent::SizeTier::settle_retry()
+{
+	const double now = settle_clock();
+	list<SettleDeferred> due;
+	double next_retry = -1;
+	unique_lock<mutex> lock(m_settle_mutex);
+	for (auto i = m_settle_deferred.begin(); i != m_settle_deferred.end(); ) {
+		const auto this_i = i++;
+		if (this_i->m_retry <= now) {
+			due.splice(due.end(), m_settle_deferred, this_i);
+		} else {
+			const double wait = this_i->m_retry - now;
+			next_retry = next_retry < 0 ? wait : min(next_retry, wait);
+		}
+	}
+	lock.unlock();
+	const auto sft = shared_from_this();
+	const auto scan_task = m_scan_task;
+	for (const auto &i : due) {
+		ostringstream oss;
+		oss << "map_" << hex << i.m_bytenr << dec << "_" << pretty(i.m_length);
+		Task create_map_task(oss.str(), [sft, i, scan_task]() {
+			sft->create_extent_map(i.m_bytenr, i.m_hold, i.m_length, scan_task, i.m_since);
+			BEESCOUNT(crawl_extent_settle_retry);
+			sft->m_bsme->m_roots->crawl_state_set_work();
+		});
+		create_map_task.run();
+	}
+	return next_retry;
+}
+
 void
-BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const ProgressTracker<BeesCrawlState>::ProgressHolder& hold, const uint64_t len, const Task &next_task)
+BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const ProgressTracker<BeesCrawlState>::ProgressHolder& hold, const uint64_t len, const Task &next_task, const double deferred_since)
 {
 	BEESNOTE("Creating extent map for " << to_hex(bytenr) << " with LOGICAL_INO");
 	BEESTRACE("Creating extent map for " << to_hex(bytenr) << " with LOGICAL_INO");
@@ -818,6 +896,10 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 	// Refs in read-only roots, if the btrfs send workaround is enabled
 	list<ExtentRef> ro_refs_list;
 	map<uint64_t, bool> root_ro_cache;
+	// Settle delay: the latest change time (ctime or mtime) of the files we would scan
+	const double settle_delay = m_bsme->m_roots->settle_delay();
+	map<pair<uint64_t, uint64_t>, uint64_t> inode_changed_cache;
+	uint64_t settle_changed = 0;
 	for (const auto &i : log_ino.m_iors) {
 		catch_all([&](){
 			if (check_nocow) {
@@ -866,6 +948,18 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 				return; // from the catch_all
 			}
 
+			if (settle_delay > 0) {
+				const auto inode_key = make_pair(i.m_root, i.m_inum);
+				auto changed_found = inode_changed_cache.find(inode_key);
+				if (changed_found == inode_changed_cache.end()) {
+					BEESTRACE("checking inode times for extent " << to_hex(bytenr) << " ref at root " << i.m_root << " ino " << i.m_inum);
+					const auto inode_item = inode_btf.stat(i.m_root, i.m_inum);
+					const uint64_t changed = !!inode_item ? inode_item.inode_changed_sec() : 0;
+					changed_found = inode_changed_cache.insert(make_pair(inode_key, changed)).first;
+				}
+				settle_changed = max(settle_changed, changed_found->second);
+			}
+
 			refs_list->push_back(extref);
 			BEESCOUNT(extent_ref_ok);
 		});
@@ -891,6 +985,28 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 	if (refs_list->empty()) {
 		BEESCOUNT(extent_empty);
 		return;
+	}
+
+	// Settle delay, second part.  The extent itself is old enough or we
+	// would not be here, but one of its files may still be changing: an
+	// append, a download, a VM image.  Scanning it now means reading a file
+	// that is being written, and a dedupe would flush and lock its inode.
+	// So look at the extent again once the file has been left alone for
+	// the delay.  The hold keeps the saved crawl position behind the
+	// extent until then, so a restart doesn't lose it.  If the extent is
+	// deleted in the meantime, the next look finds no refs and reads nothing.
+	if (settle_delay > 0) {
+		const double changed_age = difftime(time(NULL), settle_changed);
+		if (changed_age < settle_delay) {
+			// If the clock went backwards, don't wait for it to catch up
+			const double retry_after = min(settle_delay - changed_age, settle_delay) + 1;
+			if (settle_defer(bytenr, len, hold, deferred_since, retry_after)) {
+				BEESCOUNT(extent_settle_defer);
+				return;
+			}
+			// Waited too long, or too many are waiting.  Scan it anyway.
+			BEESCOUNT(extent_settle_giveup);
+		}
 	}
 
 	// Sort list in sane read/search order
@@ -1313,6 +1429,19 @@ BeesScanModeExtent::next_transid()
 	// Kick off tasks if they aren't already running
 	start_scan();
 
+	// Settle delay: look again at the extents whose files were still changing
+	if (m_roots->settle_delay() > 0) {
+		unique_lock<mutex> lock(m_mutex);
+		const auto size_tiers_copy = m_size_tiers;
+		lock.unlock();
+		for (const auto &i : size_tiers_copy) {
+			const double next_retry = i.second->settle_retry();
+			if (next_retry >= 0) {
+				m_roots->settle_retry_after(next_retry);
+			}
+		}
+	}
+
 	// Estimate progress by building a map of where the extent bytenrs are (they are sparse,
 	// no extents exist between block groups), and report the position within that map.
 
@@ -1726,6 +1855,23 @@ BeesRoots::transid_scan_max()
 	return transid_max();
 }
 
+void
+BeesRoots::settle_retry_after(const double seconds)
+{
+	const double retry = settle_clock() + max(seconds, 0.0);
+	unique_lock<mutex> lock(m_settle_mutex);
+	if (m_settle_retry > 0 && m_settle_retry <= retry) {
+		// Already going to wake up before then
+		return;
+	}
+	m_settle_retry = retry;
+	lock.unlock();
+	// Make the crawl thread work out its sleep time again
+	unique_lock<mutex> stop_lock(m_stop_mutex);
+	m_crawl_wake = true;
+	m_crawl_condvar.notify_all();
+}
+
 uint64_t
 BeesRoots::transid_max()
 {
@@ -1918,12 +2064,18 @@ BeesRoots::crawl_thread()
 		// It is 0 after startup until the first transid has settled,
 		// and the scanners are not started before that.
 		auto new_scan_transid = new_transid;
+		bool settle_retry = false;
 		if (m_settle_delay > 0) {
 			const auto now = settle_clock();
 			unique_lock<mutex> lock(m_settle_mutex);
 			new_scan_transid = m_settle_history.settled(now, m_settle_delay);
+			if (m_settle_retry > 0 && m_settle_retry <= now) {
+				// Some extents were put aside because their files were still changing
+				settle_retry = true;
+				m_settle_retry = 0;
+			}
 		}
-		if (new_scan_transid != last_scan_transid) {
+		if (new_scan_transid != last_scan_transid || (settle_retry && new_scan_transid)) {
 			// Insert new roots and restart crawl_more.
 			crawl_new.run();
 			// The status is about to change
@@ -1933,12 +2085,16 @@ BeesRoots::crawl_thread()
 
 		auto poll_time = max(BEES_TRANSID_POLL_INTERVAL, m_transid_re.seconds_for(1));
 		if (m_settle_delay > 0) {
-			// Wake up when the next transid settles.  If none is waiting, there is nothing to wake up for.
+			// Wake up when the next transid settles or the next deferred extent is due.
+			// If there are neither, there is nothing to wake up for.
 			const auto now = settle_clock();
 			unique_lock<mutex> lock(m_settle_mutex);
 			const auto settle_wait = m_settle_history.next_change(now, m_settle_delay);
 			if (settle_wait >= 0) {
 				poll_time = min(poll_time, settle_wait);
+			}
+			if (m_settle_retry > 0) {
+				poll_time = min(poll_time, max(m_settle_retry - now, 0.0));
 			}
 		}
 		BEESLOGDEBUG("Polling " << poll_time << "s for next transid " << m_transid_re);
@@ -1948,7 +2104,8 @@ BeesRoots::crawl_thread()
 			BEESLOGDEBUG("Stop requested in crawl thread");
 			break;
 		}
-		m_stop_condvar.wait_for(lock, chrono::duration<double>(poll_time));
+		m_crawl_condvar.wait_for(lock, chrono::duration<double>(poll_time), [&]() { return m_crawl_wake || m_stop_requested; });
+		m_crawl_wake = false;
 	}
 }
 
@@ -2136,6 +2293,7 @@ BeesRoots::stop_request()
 	unique_lock<mutex> lock(m_stop_mutex);
 	m_stop_requested = true;
 	m_stop_condvar.notify_all();
+	m_crawl_condvar.notify_all();
 }
 
 void
