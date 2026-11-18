@@ -320,6 +320,7 @@ The `replacesrc` event group consists of events related to replacing every refer
  * `replacesrc_grown`: A duplicate block was identified, and adjacent blocks were duplicate as well.
  * `replacesrc_overlaps`: A pair of duplicate block ranges was identified, but the pair was not usable for dedupe because the two ranges overlap.
  * `replacesrc_try`: A duplicate block was identified and an attempt was made to remove it (i.e. this is the total number of replacedst calls).
+ * `replacesrc_workaround_btrfs_send`: A reference to an extent that was being replaced was left alone because it is in a read-only subvol and the `--workaround-btrfs-send` option is enabled.  Before this counter existed, the reference was opened and compared, and counted in `dedup_workaround_btrfs_send` when the dedupe was refused.
 
 
 resolve

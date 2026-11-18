@@ -303,7 +303,7 @@ BeesResolver::replace_src(const BeesFileRange &src_bfr)
 			BEESCOUNT(replacesrc_dedup_miss);
 		}
 		return false; // i.e. continue
-	});
+	}, true);
 }
 
 void
@@ -343,12 +343,13 @@ BeesResolver::find_matches(bool just_one, BeesBlockData &bbd)
 }
 
 bool
-BeesResolver::for_each_extent_ref(BeesBlockData bbd, function<bool(const BeesFileRange &bfr)> visitor)
+BeesResolver::for_each_extent_ref(BeesBlockData bbd, function<bool(const BeesFileRange &bfr)> visitor, const bool refs_are_dst)
 {
 	// Walk through the (ino, offset, root) tuples until we are told to stop
 	BEESTRACE("for_each_extent_ref " << bbd << " at " << m_addr << ": " << m_biors.size() << " found");
 	THROW_CHECK0(runtime_error, !m_is_toxic);
 	bool stop_now = false;
+	map<uint64_t, bool> root_ro_cache;
 	for (auto ino_off_root : m_biors) {
 		BEESTRACE("ino_off_root " << ino_off_root);
 		BeesFileId this_fid(ino_off_root.m_root, ino_off_root.m_inum);
@@ -356,6 +357,21 @@ BeesResolver::for_each_extent_ref(BeesBlockData bbd, function<bool(const BeesFil
 		// Silently ignore blacklisted files, e.g. BeesTempFile files
 		if (m_ctx->is_blacklisted(this_fid)) {
 			continue;
+		}
+
+		// With the btrfs send workaround, dedup() refuses a dst in a read-only
+		// root.  If the caller wants these refs as dedupe dst, drop such a ref
+		// here, before its file is opened, read and compared for nothing.
+		if (refs_are_dst) {
+			auto ro_found = root_ro_cache.find(ino_off_root.m_root);
+			if (ro_found == root_ro_cache.end()) {
+				BEESTRACE("checking root " << ino_off_root.m_root << " for btrfs send workaround");
+				ro_found = root_ro_cache.insert(make_pair(ino_off_root.m_root, m_ctx->is_root_ro(ino_off_root.m_root))).first;
+			}
+			if (ro_found->second) {
+				BEESCOUNT(replacesrc_workaround_btrfs_send);
+				continue;
+			}
 		}
 
 		// Look at the old data

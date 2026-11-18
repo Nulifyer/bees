@@ -992,7 +992,8 @@ public:
 	BeesAddress addr(BeesAddress new_addr);
 
 	// visitor returns true to stop loop, false to continue
-	bool for_each_extent_ref(BeesBlockData bbd, function<bool(const BeesFileRange &bfr)> visitor);
+	// refs_are_dst: the visitor uses the refs as dedupe dst, so skip those that can't be
+	bool for_each_extent_ref(BeesBlockData bbd, function<bool(const BeesFileRange &bfr)> visitor, bool refs_are_dst = false);
 
 	set<BeesFileRange> find_all_matches(BeesBlockData &bbd);
 	set<BeesFileRange> find_all_matches(BeesHash hash);
