@@ -385,9 +385,13 @@ class BeesStringFile {
 	Fd	m_dir_fd;
 	string	m_name;
 	size_t	m_limit;
+	function<void(int)> m_seen_fd;
 
 public:
 	BeesStringFile(Fd dir_fd, string name, size_t limit = 16 * 1024 * 1024);
+	/// Call f with an open fd of the file as it is now, and again every time
+	/// write() replaces it (each write makes a new inode)
+	void seen_fd(function<void(int)> f);
 	string read();
 	void write(string contents);
 	void name(const string &new_name);
@@ -754,6 +758,8 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 
 	mutable mutex					m_blacklist_mutex;
 	set<BeesFileId>					m_blacklist;
+	/// Files in $BEESHOME that are replaced on every write, by name
+	map<string, BeesFileId>				m_home_files;
 
 	Timer						m_total_timer;
 
@@ -799,6 +805,9 @@ public:
 
 	void blacklist_insert(const BeesFileId &fid);
 	void blacklist_erase(const BeesFileId &fid);
+	/// Blacklist the file open at fd as the current version of a $BEESHOME file,
+	/// and drop the version that was blacklisted under that name before
+	void blacklist_home_file(const string &name, int fd);
 	bool is_blacklisted(const BeesFileId &fid) const;
 
 	shared_ptr<Exclusion> get_inode_mutex(uint64_t inode);

@@ -1204,6 +1204,28 @@ BeesScanModeExtent::SizeTier::find_next_extent()
 			continue;
 		}
 
+		// If the extent item itself names every file that references this extent,
+		// and all of them are blacklisted (the hash table and the other files in
+		// $BEESHOME, which bees writes itself), drop the extent here.  Otherwise
+		// bees would look up each of its own writes with LOGICAL_INO only to find
+		// out, when it comes to scanning them, that they are blacklisted.
+		bool all_blacklisted = false;
+		catch_all([&]() {
+			const auto data_refs = bti.extent_data_refs();
+			all_blacklisted = !data_refs.empty();
+			for (const auto &i : data_refs) {
+				if (!m_ctx->is_blacklisted(BeesFileId(i.m_root, i.m_objectid))) {
+					all_blacklisted = false;
+					break;
+				}
+			}
+		});
+		if (all_blacklisted) {
+			MNE_DEBUG("all refs blacklisted");
+			BEESCOUNT(crawl_blacklisted);
+			continue;
+		}
+
 		const auto find_next_task = Task::current_task();
 		// Note next_hold >= this_hold > current_hold after the swap above,
 		// so the extent map may or may not advance the BeesCrawlState position.
@@ -1973,6 +1995,13 @@ BeesRoots::BeesRoots(shared_ptr<BeesContext> ctx) :
 	m_crawl_thread("crawl_transid"),
 	m_writeback_thread("crawl_writeback")
 {
+	// Each save of the crawl state makes a new file.  Keep the current one blacklisted.
+	catch_all([&]() {
+		const auto name = crawl_state_filename();
+		m_crawl_state_file.seen_fd([ctx, name](int fd) {
+			ctx->blacklist_home_file(name, fd);
+		});
+	});
 }
 
 void

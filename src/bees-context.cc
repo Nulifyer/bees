@@ -1271,6 +1271,30 @@ BeesContext::blacklist_erase(const BeesFileId &fid)
 	m_blacklist.erase(fid);
 }
 
+void
+BeesContext::blacklist_home_file(const string &name, const int fd)
+{
+	// Only a file on the filesystem we scan can turn up in a scan
+	BtrfsIoctlFsInfoArgs root_info;
+	root_info.do_ioctl(root_fd());
+	BtrfsIoctlFsInfoArgs file_info;
+	if (!file_info.do_ioctl_nothrow(fd)) return;
+	if (root_info.fsid() != file_info.fsid()) return;
+	const BeesFileId fid(fd);
+	unique_lock<mutex> lock(m_blacklist_mutex);
+	const auto found = m_home_files.find(name);
+	if (found != m_home_files.end()) {
+		if (found->second == fid) {
+			return;
+		}
+		m_blacklist.erase(found->second);
+		found->second = fid;
+	} else {
+		m_home_files.insert(make_pair(name, fid));
+	}
+	m_blacklist.insert(fid);
+}
+
 bool
 BeesContext::is_blacklisted(const BeesFileId &fid) const
 {

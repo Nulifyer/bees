@@ -387,6 +387,17 @@ BeesStringFile::name() const
 	return m_name;
 }
 
+void
+BeesStringFile::seen_fd(function<void(int)> f)
+{
+	m_seen_fd = f;
+	// Report the file that is there now, if there is one
+	Fd fd(openat(m_dir_fd, m_name.c_str(), FLAGS_OPEN_FILE));
+	if (!!fd) {
+		m_seen_fd(fd);
+	}
+}
+
 string
 BeesStringFile::read()
 {
@@ -489,6 +500,12 @@ BeesStringFile::write(string contents)
 		write_or_die(ofd, contents);
 		BEESNOTE("fsyncing " << tmpname << " in " << name_fd(m_dir_fd));
 		bees_fsync(ofd);
+		if (m_seen_fd) {
+			// Not worth losing the write over
+			catch_all([&]() {
+				m_seen_fd(ofd);
+			});
+		}
 	}
 	BEESNOTE("renaming " << tmpname << " to " << m_name << " in FD " << name_fd(m_dir_fd));
 	BEESTRACE("renaming " << tmpname << " to " << m_name << " in FD " << name_fd(m_dir_fd));

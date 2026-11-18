@@ -835,6 +835,13 @@ BeesHashTable::BeesHashTable(shared_ptr<BeesContext> ctx, string filename, off_t
 		// Hash is on the same one, blacklist it
 		m_ctx->blacklist_insert(BeesFileId(m_fd));
 	});
+
+	// Each write of the stats file makes a new file.  Keep the current one blacklisted.
+	catch_all([&]() {
+		m_stats_file.seen_fd([this](int fd) {
+			m_ctx->blacklist_home_file("beesstats.txt", fd);
+		});
+	});
 }
 
 BeesHashTable::~BeesHashTable()

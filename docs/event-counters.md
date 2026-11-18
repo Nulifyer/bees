@@ -119,7 +119,7 @@ crawl
 The `crawl` event group consists of operations related to scanning btrfs trees to find new extent refs to scan for dedupe.
 
  * `crawl_again`: An inode crawl was restarted because the extent was already locked by another running crawl.
- * `crawl_blacklisted`: An extent was not scanned because it belongs to a blacklisted file.
+ * `crawl_blacklisted`: An extent was not scanned because it belongs to a blacklisted file.  In extent scan mode this is decided from the extent item, before any `LOGICAL_INO` call.
  * `crawl_deferred_inode`: Two tasks attempted to scan the same inode at the same time, so one was deferred.
  * `crawl_done`: One pass over a subvol was completed.
  * `crawl_discard_high`: An extent that was too large for the crawler's size tier was discarded.
