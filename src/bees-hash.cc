@@ -253,7 +253,27 @@ BeesHashTable::prefetch_loop()
 {
 	Uname uname;
 	bool not_locked = true;
+	// Event counters and progress at the time of the last report
+	string last_report;
 	while (!m_stop_requested) {
+		// The hash table can't change without an event counter changing.
+		// If none did since the last report, the report would say the
+		// same thing, so don't walk the table and don't write the stats
+		// file: that write is a new transaction on an idle filesystem.
+		if (!last_report.empty()) {
+			ostringstream report_oss;
+			report_oss << BeesStats::s_global << "\n" << m_ctx->get_progress();
+			if (report_oss.str() == last_report) {
+				BEESNOTE("idle " << BEES_HASH_TABLE_ANALYZE_INTERVAL << "s, nothing changed");
+				unique_lock<mutex> lock(m_stop_mutex);
+				if (m_stop_requested) {
+					return;
+				}
+				m_stop_condvar.wait_for(lock, chrono::duration<double>(BEES_HASH_TABLE_ANALYZE_INTERVAL));
+				continue;
+			}
+		}
+
 		size_t width = 64;
 		vector<size_t> occupancy(width, 0);
 		size_t occupied_count = 0;
@@ -365,12 +385,20 @@ BeesHashTable::prefetch_loop()
 		auto avg_rates = thisStats / m_ctx->total_timer().age();
 		graph_blob << "\t" << avg_rates << "\n";
 
-		graph_blob << m_ctx->get_progress();
+		const auto progress_str = m_ctx->get_progress();
+		graph_blob << progress_str;
 
 		BEESLOGINFO(graph_blob.str());
 		catch_all([&]() {
 			m_stats_file.write(graph_blob.str());
 		});
+
+		// Remember what we reported
+		{
+			ostringstream report_oss;
+			report_oss << thisStats << "\n" << progress_str;
+			last_report = report_oss.str();
+		}
 
 		if (not_locked && !m_stop_requested) {
 			// Always do the mlock, whether shared or not
