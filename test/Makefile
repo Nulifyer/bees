@@ -1,6 +1,7 @@
 PROGRAMS = \
 	chatter \
 	crc64 \
+	extent_data_refs \
 	extent_ref_order \
 	fd \
 	limits \

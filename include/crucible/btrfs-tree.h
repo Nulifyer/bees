@@ -8,6 +8,14 @@
 namespace crucible {
 	using namespace std;
 
+	/// One EXTENT_DATA_REF: the file (and offset key) that references a data extent.
+	struct BtrfsExtentDataRef {
+		uint64_t m_root;
+		uint64_t m_objectid;
+		uint64_t m_offset;
+		uint32_t m_count;
+	};
+
 	class BtrfsTreeItem {
 		uint64_t m_objectid = 0;
 		uint64_t m_offset = 0;
@@ -51,6 +59,8 @@ namespace crucible {
 		/// @{ Inode items
 		uint64_t inode_flags() const;
 		uint64_t inode_size() const;
+		/// Later of ctime and mtime, in seconds since the epoch
+		uint64_t inode_changed_sec() const;
 		/// @}
 
 		/// @{ Extent refs (EXTENT_DATA)
@@ -67,11 +77,20 @@ namespace crucible {
 		uint64_t extent_end() const;
 		uint64_t extent_flags() const;
 		uint64_t extent_generation() const;
+		/// All references to a data extent, when every one of them
+		/// is an inline EXTENT_DATA_REF in the extent item itself
+		/// (true for an extent that was written and not yet cloned,
+		/// snapshotted or deduped).  Empty when some references
+		/// are stored elsewhere, so the item alone can't name all
+		/// the files.
+		vector<BtrfsExtentDataRef> extent_data_refs() const;
 		/// @}
 
 		/// @{ Root items
 		uint64_t root_flags() const;
 		uint64_t root_refs() const;
+		/// Generation of the tree's root node when the root item was written
+		uint64_t root_generation() const;
 		/// @}
 
 		/// @{ Root backref items.

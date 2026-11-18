@@ -42,6 +42,45 @@ namespace crucible {
 		return btrfs_get_member(&btrfs_extent_item::generation, m_data);
 	}
 
+	vector<BtrfsExtentDataRef>
+	BtrfsTreeItem::extent_data_refs() const
+	{
+		THROW_CHECK1(invalid_argument, btrfs_search_type_ntoa(m_type), m_type == BTRFS_EXTENT_ITEM_KEY);
+		vector<BtrfsExtentDataRef> rv;
+		if (extent_flags() & BTRFS_EXTENT_FLAG_TREE_BLOCK) {
+			return rv;
+		}
+		const uint64_t total_refs = btrfs_get_member(&btrfs_extent_item::refs, m_data);
+		uint64_t inline_refs = 0;
+		// Inline refs follow the extent item.  Each starts with a type byte.
+		// The data ref overlays the 'offset' field of btrfs_extent_inline_ref.
+		const size_t data_ref_offset = offsetof(btrfs_extent_inline_ref, offset);
+		size_t pos = sizeof(btrfs_extent_item);
+		while (pos < m_data.size()) {
+			const uint8_t type = btrfs_get_member(&btrfs_extent_inline_ref::type, m_data, pos);
+			if (type != BTRFS_EXTENT_DATA_REF_KEY) {
+				// Shared refs name a metadata block, not a file,
+				// and anything else is something we don't know.
+				return vector<BtrfsExtentDataRef>();
+			}
+			const size_t ref_pos = pos + data_ref_offset;
+			const BtrfsExtentDataRef ref = {
+				.m_root = btrfs_get_member(&btrfs_extent_data_ref::root, m_data, ref_pos),
+				.m_objectid = btrfs_get_member(&btrfs_extent_data_ref::objectid, m_data, ref_pos),
+				.m_offset = btrfs_get_member(&btrfs_extent_data_ref::offset, m_data, ref_pos),
+				.m_count = btrfs_get_member(&btrfs_extent_data_ref::count, m_data, ref_pos),
+			};
+			rv.push_back(ref);
+			inline_refs += ref.m_count;
+			pos = ref_pos + sizeof(btrfs_extent_data_ref);
+		}
+		// The rest of the refs are in separate items
+		if (inline_refs != total_refs) {
+			return vector<BtrfsExtentDataRef>();
+		}
+		return rv;
+	}
+
 	uint64_t
 	BtrfsTreeItem::root_ref_dirid() const
 	{
@@ -79,6 +118,13 @@ namespace crucible {
 	{
 		THROW_CHECK1(invalid_argument, btrfs_search_type_ntoa(m_type), m_type == BTRFS_ROOT_ITEM_KEY);
 		return btrfs_get_member(&btrfs_root_item::refs, m_data);
+	}
+
+	uint64_t
+	BtrfsTreeItem::root_generation() const
+	{
+		THROW_CHECK1(invalid_argument, btrfs_search_type_ntoa(m_type), m_type == BTRFS_ROOT_ITEM_KEY);
+		return btrfs_get_member(&btrfs_root_item::generation, m_data);
 	}
 
 	ostream &
@@ -162,6 +208,17 @@ namespace crucible {
 	{
 		THROW_CHECK1(invalid_argument, btrfs_search_type_ntoa(m_type), m_type == BTRFS_INODE_ITEM_KEY);
 		return btrfs_get_member(&btrfs_inode_item::flags, m_data);
+	}
+
+	uint64_t
+	BtrfsTreeItem::inode_changed_sec() const
+	{
+		THROW_CHECK1(invalid_argument, btrfs_search_type_ntoa(m_type), m_type == BTRFS_INODE_ITEM_KEY);
+		const size_t ctime_offset = offsetof(btrfs_inode_item, ctime);
+		const size_t mtime_offset = offsetof(btrfs_inode_item, mtime);
+		const uint64_t ctime_sec = btrfs_get_member(&btrfs_timespec::sec, m_data, ctime_offset);
+		const uint64_t mtime_sec = btrfs_get_member(&btrfs_timespec::sec, m_data, mtime_offset);
+		return max(ctime_sec, mtime_sec);
 	}
 
 	uint64_t
