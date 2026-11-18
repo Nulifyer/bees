@@ -118,7 +118,7 @@ test_all_or_none()
 		{ 100, 0x100000, true, {} },
 		{ 101, 0x101000, true, {} },
 	};
-	assert(bees_insert_unless_raced(insert_mutex, table, first));
+	assert(bees_insert_unless_raced(insert_mutex, table, first) == 0);
 	assert(table.count_extent(1) == 2);
 
 	// The last block's hash was inserted by someone else: nothing goes in,
@@ -128,21 +128,56 @@ test_all_or_none()
 		{ 301, 0x201000, true, {} },
 		{ 101, 0x202000, true, {} },
 	};
-	assert(!bees_insert_unless_raced(insert_mutex, table, second));
+	assert(bees_insert_unless_raced(insert_mutex, table, second) == 1);
 	assert(table.count_extent(2) == 0);
+
+	// Every block that raced is counted
+	const vector<Block> both {
+		{ 100, 0x400000, true, {} },
+		{ 500, 0x401000, true, {} },
+		{ 101, 0x402000, true, {} },
+	};
+	assert(bees_insert_unless_raced(insert_mutex, table, both) == 2);
+	assert(table.count_extent(4) == 0);
 
 	// Once the lookup has seen that address, it is not news any more
 	auto second_seen = second;
 	second_seen.at(2).m_seen.push_back(0x101000);
-	assert(bees_insert_unless_raced(insert_mutex, table, second_seen));
+	assert(bees_insert_unless_raced(insert_mutex, table, second_seen) == 0);
 	assert(table.count_extent(2) == 3);
 
 	// A block that was not looked up is not checked
 	const vector<Block> third {
 		{ 100, 0x300000, false, {} },
 	};
-	assert(bees_insert_unless_raced(insert_mutex, table, third));
+	assert(bees_insert_unless_raced(insert_mutex, table, third) == 0);
 	assert(table.count_extent(3) == 1);
+}
+
+static
+void
+test_worthwhile()
+{
+	// (raced, duplicates found by the first scan, zero blocks, blocks of data)
+	// A whole extent turned up: scan again
+	assert(bees_race_rescan_worthwhile(32, 0, 0, 32));
+	assert(bees_race_rescan_worthwhile(1, 0, 0, 1));
+	// Half of it: deduping 16 blocks costs a copy of 16, which bees accepts
+	assert(bees_race_rescan_worthwhile(16, 0, 0, 32));
+	// Less than half: the copy would cost more than the dedupe frees
+	assert(!bees_race_rescan_worthwhile(15, 0, 0, 32));
+	// One block that is in every other file, in a 128M extent
+	assert(!bees_race_rescan_worthwhile(1, 0, 0, 32768));
+	// The first scan found duplicates but not enough of them; with the new ones it is enough
+	assert(!bees_race_rescan_worthwhile(4, 8, 0, 32));
+	assert(bees_race_rescan_worthwhile(8, 8, 0, 32));
+	// Zero blocks are freed (holes) by the same rewrite, so they count for it
+	assert(!bees_race_rescan_worthwhile(8, 0, 15, 32));
+	assert(bees_race_rescan_worthwhile(8, 0, 16, 32));
+	// More reported than there is: no underflow
+	assert(bees_race_rescan_worthwhile(40, 40, 0, 32));
+	// Nothing raced, nothing to gain
+	assert(!bees_race_rescan_worthwhile(0, 0, 0, 32));
 }
 
 // What a worker did with its extent
@@ -185,7 +220,7 @@ scan_extent(mutex &insert_mutex, Table &table, const uint64_t extent, const vect
 			rv.m_kept = true;
 			return rv;
 		}
-		if (bees_insert_unless_raced(insert_mutex, table, blocks)) {
+		if (bees_insert_unless_raced(insert_mutex, table, blocks) == 0) {
 			rv.m_kept = true;
 			return rv;
 		}
@@ -310,6 +345,7 @@ main(int, char**)
 {
 	RUN_A_TEST(test_unseen());
 	RUN_A_TEST(test_all_or_none());
+	RUN_A_TEST(test_worthwhile());
 	RUN_A_TEST(test_race());
 	RUN_A_TEST(test_race_without_check());
 	RUN_A_TEST(test_overlap());

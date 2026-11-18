@@ -486,9 +486,10 @@ public:
 	/// Insert the hashes of one scanned extent with push_random_hash_addr,
 	/// all or none: if the table holds one of the looked-up hashes at an
 	/// address the scan has not seen, another worker inserted it after
-	/// our lookup; then insert nothing and return false, unless
-	/// even_if_raced (see bees-insert-race.h).
-	bool		insert_scanned_extent(const vector<ScannedBlock> &blocks, bool even_if_raced);
+	/// our lookup; then insert nothing and return the number of such
+	/// blocks.  Returns 0 if the hashes were inserted, which they always
+	/// are with even_if_raced (see bees-insert-race.h).
+	size_t		insert_scanned_extent(const vector<ScannedBlock> &blocks, bool even_if_raced);
 	bool		push_random_hash_addr(HashType hash, AddrType addr);
 	void		erase_hash_addr(HashType hash, AddrType addr);
 	bool		push_front_hash_addr(HashType hash, AddrType addr);

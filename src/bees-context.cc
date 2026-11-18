@@ -1,5 +1,7 @@
 #include "bees.h"
 
+#include "bees-insert-race.h"
+
 #include "crucible/cleanup.h"
 #include "crucible/limits.h"
 #include "crucible/string.h"
@@ -421,10 +423,17 @@ BeesContext::rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesH
 	// of the hash table.  The copy is a new extent, so the crawl scans it in its
 	// next cycle, finds the other worker's copy and dedupes the two.  If we inserted
 	// our hashes now, that scan would find them and take the extent for done.
-	if (hash_table->insert_scanned_extent(copied_blocks, false)) {
+	// Unless only a few of the blocks are concerned: then that scan could not
+	// dedupe the copy either, see bees_race_rescan_worthwhile.
+	const auto raced_blocks = hash_table->insert_scanned_extent(copied_blocks, false);
+	if (!raced_blocks) {
 		BEESCOUNTADD(scan_reinsert, copied_blocks.size());
-	} else {
+	} else if (bees_race_rescan_worthwhile(raced_blocks, 0, 0, copied_blocks.size())) {
 		BEESCOUNT(scan_race_reinsert);
+	} else {
+		BEESCOUNT(scan_race_ignored);
+		hash_table->insert_scanned_extent(copied_blocks, true);
+		BEESCOUNTADD(scan_reinsert, copied_blocks.size());
 	}
 }
 
@@ -986,13 +995,21 @@ BeesContext::scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, con
 			scanned_blocks.push_back(move(i.second));
 		}
 		// All or none.  None if another worker got in first with one of our hashes.
-		if (!hash_table->insert_scanned_extent(scanned_blocks, false)) {
-			if (rescan_if_raced) {
-				BEESLOGDEBUG("Hashes of " << to_hex(e.bytenr()) << " were inserted by another scan, scanning again " << bfr);
+		const auto raced_blocks = hash_table->insert_scanned_extent(scanned_blocks, false);
+		if (raced_blocks) {
+			// Scan again if that can end in a dedupe: not for a block or two
+			// that this extent has in common with half the filesystem
+			const bool worthwhile = bees_race_rescan_worthwhile(raced_blocks, dedupe_set.size(), zero_set.size(), scanned_blocks.size());
+			if (worthwhile && rescan_if_raced) {
+				BEESLOGDEBUG("Hashes of " << raced_blocks << " blocks of " << to_hex(e.bytenr()) << " were inserted by another scan, scanning again " << bfr);
 				return true;
 			}
-			// We have scanned this extent often enough
-			BEESCOUNT(scan_race_giveup);
+			if (worthwhile) {
+				// We have scanned this extent often enough
+				BEESCOUNT(scan_race_giveup);
+			} else {
+				BEESCOUNT(scan_race_ignored);
+			}
 			hash_table->insert_scanned_extent(scanned_blocks, true);
 		}
 		for (const auto &i : insert_map) {

@@ -2,6 +2,7 @@
 #define BEES_INSERT_RACE_H
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 
@@ -41,6 +42,17 @@
 // seen addresses now, so only yet another new copy sends it round again, and
 // the caller limits the number of rounds.
 //
+// Not every hash that turns up is worth a second scan.  Some blocks are in
+// many files (padding, a licence text, a table of constants), and with
+// several workers there is nearly always one that has just inserted such a
+// block.  bees does not dedupe a block or two out of an extent anyway: it
+// would have to copy the rest, and it only does that if the dedupe frees at
+// least as much as the copy costs.  So the second scan is made only if the
+// blocks that turned up, together with the duplicates the first scan found,
+// could pass that test (bees_race_rescan_worthwhile).  Otherwise the hashes
+// are inserted as if nothing had happened, which is also what a single
+// worker would have done with these extents, whichever came first.
+//
 // bees also inserts hashes when it has rewritten part of an extent (the part
 // of a partly duplicate extent that was not duplicate is copied to a new
 // extent).  Two workers that do this to two copies of the same data make two
@@ -75,22 +87,40 @@ bees_hash_at_unseen_addr(CellIter begin, CellIter end, const uint64_t hash, cons
 }
 
 /// Insert all of `blocks` into `table`, or none of them if table.raced(block)
-/// is true for any block.  Returns true if the blocks were inserted.
-/// All callers must pass the same mutex.
+/// is true for any block.  Returns the number of blocks that raced: 0 means
+/// the blocks were inserted.  All callers must pass the same mutex.
 template <class Table, class BlockRange>
-bool
+size_t
 bees_insert_unless_raced(std::mutex &insert_mutex, Table &table, const BlockRange &blocks)
 {
 	std::unique_lock<std::mutex> lock(insert_mutex);
+	size_t raced = 0;
 	for (const auto &block : blocks) {
 		if (table.raced(block)) {
-			return false;
+			++raced;
 		}
+	}
+	if (raced) {
+		return raced;
 	}
 	for (const auto &block : blocks) {
 		table.insert(block);
 	}
-	return true;
+	return 0;
+}
+
+/// Can a second scan of an extent end in a dedupe?  The extent has `nonzero`
+/// blocks of data and `zero` blocks of zeros; the first scan found
+/// duplicates for `dup` blocks, and `raced` more have turned up in the hash
+/// table since.  bees dedupes part of an extent only if the bytes it frees
+/// (deduped or zero) are at least the bytes it has to copy (the rest), see
+/// "nuisance dedupes" in BeesContext::scan_one_extent_once.
+inline
+bool
+bees_race_rescan_worthwhile(const size_t raced, const size_t dup, const size_t zero, const size_t nonzero)
+{
+	const size_t could_dedupe = std::min(nonzero, raced + dup);
+	return nonzero - could_dedupe <= could_dedupe + zero;
 }
 
 #endif

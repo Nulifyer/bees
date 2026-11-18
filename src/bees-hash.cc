@@ -969,7 +969,7 @@ BeesHashTable::scanned_block_raced(const ScannedBlock &block)
 	});
 }
 
-bool
+size_t
 BeesHashTable::insert_scanned_extent(const vector<ScannedBlock> &blocks, const bool even_if_raced)
 {
 	struct Table {
