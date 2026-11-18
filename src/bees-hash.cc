@@ -400,7 +400,7 @@ BeesHashTable::prefetch_loop()
 			last_report = report_oss.str();
 		}
 
-		if (not_locked && !m_stop_requested) {
+		if (not_locked && !m_stop_requested && m_ctx->hash_mlock()) {
 			// Always do the mlock, whether shared or not
 			THROW_CHECK1(runtime_error, m_size, m_size > 0);
 			BEESLOGINFO("mlock(" << pretty(m_size) << ")...");

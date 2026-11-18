@@ -1416,6 +1416,17 @@ BeesContext::set_root_path(string path)
 }
 
 void
+BeesContext::set_hash_mlock(const bool do_mlock)
+{
+	m_hash_mlock = do_mlock;
+	if (m_hash_mlock) {
+		BEESLOGINFO("locking hash table in memory");
+	} else {
+		BEESLOGINFO("not locking hash table in memory");
+	}
+}
+
+void
 BeesContext::set_keep_prealloc(bool keep)
 {
 	m_keep_prealloc = keep;

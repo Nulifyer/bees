@@ -14,6 +14,8 @@ Load management options:
     -G, --thread-min      Minimum worker thread count (default 0)
     -g, --loadavg-target  Target load average for worker threads (default none)
         --throttle-factor Idle time between operations (default 0.0)
+        --no-mlock        Leave the hash table swappable
+                          (default: lock it in memory)
 
 Filesystem tree traversal options:
     -m, --scan-mode       Scanning mode (0..4, default 4)

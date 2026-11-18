@@ -22,7 +22,8 @@ small as 128KB.
 
 The bees hash table is loaded into RAM at startup and `mlock`ed so it
 will not be swapped out by the kernel (if swap is permitted, performance
-degrades to nearly zero, for both bees and the swap device).
+degrades to nearly zero, for both bees and the swap device).  The
+`--no-mlock` [option](options.md) leaves the table swappable.
 
 bees scans the filesystem in a single pass which removes duplicate
 extents immediately after they are detected.  There are no distinct

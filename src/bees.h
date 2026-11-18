@@ -789,6 +789,7 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 	string						m_progress_str;
 
 	bool						m_keep_prealloc = false;
+	bool						m_hash_mlock = true;
 
 	void set_root_fd(Fd fd);
 
@@ -801,6 +802,8 @@ public:
 
 	void set_root_path(string path);
 	void set_keep_prealloc(bool keep);
+	void set_hash_mlock(bool do_mlock);
+	bool hash_mlock() const { return m_hash_mlock; }
 	void set_status_interval(double seconds);
 
 	Fd root_fd() const { return m_root_fd; }

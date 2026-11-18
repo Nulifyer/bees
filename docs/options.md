@@ -64,6 +64,18 @@
 
  The maximum delay per operation is 60 seconds.
 
+* `--no-mlock`
+
+ Do not lock the hash table in memory.
+
+ By default the whole hash table is `mlock`ed once it has been read, so it
+is never swapped out or reclaimed, also while bees has nothing to do.
+With this option the hash table is ordinary anonymous memory: under
+memory pressure (or a cgroup limit such as systemd's `MemoryHigh`) the
+kernel may move parts of it to swap, and bees slows down while it reads
+them back.  Use it where giving memory back to other programs matters
+more than bees' speed, e.g. on a desktop or laptop with compressed swap.
+
 ## Filesystem tree traversal options
 
 * `--scan-mode MODE` or `-m`
