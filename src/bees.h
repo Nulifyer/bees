@@ -568,6 +568,8 @@ class BeesRoots : public enable_shared_from_this<BeesRoots> {
 	mutex					m_mutex;
 	uint64_t				m_crawl_dirty = 0;
 	uint64_t				m_crawl_clean = 0;
+	uint64_t				m_crawl_work = 0;
+	uint64_t				m_crawl_work_saved = 0;
 	Timer					m_crawl_timer;
 	BeesThread				m_crawl_thread;
 	BeesThread				m_writeback_thread;
@@ -589,7 +591,7 @@ class BeesRoots : public enable_shared_from_this<BeesRoots> {
 	uint64_t transid_max_nocache();
 	void state_load();
 	ostream &state_to_stream(ostream &os);
-	void state_save();
+	void state_save(bool force = false);
 	string crawl_state_filename() const;
 	void crawl_state_set_dirty();
 	void crawl_state_erase(const BeesCrawlState &bcs);
@@ -636,6 +638,9 @@ public:
 
 	uint64_t transid_min();
 	uint64_t transid_max();
+
+	/// A crawl found an extent to scan, or finished one: the crawl state is worth saving
+	void crawl_state_set_work();
 
 	void wait_for_transid(const uint64_t count);
 };

@@ -891,7 +891,8 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 	ostringstream oss;
 	oss << "ref_" << hex << bytenr << "_" << pretty(len) << "_" << dec << refs_list->size();
 	const auto bec = shared_from_this();
-	Task crawl_one(oss.str(), [bec, refs_list, next_task]() {
+	const auto roots = m_bsme->m_roots;
+	Task crawl_one(oss.str(), [bec, roots, refs_list, next_task]() {
 		if (!refs_list->empty()) {
 			const auto extref = *(refs_list->begin());
 			refs_list->pop_front();
@@ -904,6 +905,8 @@ BeesScanModeExtent::SizeTier::create_extent_map(const uint64_t bytenr, const Pro
 			});
 		}
 		if (refs_list->empty()) {
+			// The crawl position can move past this extent now
+			roots->crawl_state_set_work();
 			// We might be throttled and we're about to exit a task, so restart our map task
 			if (!should_throttle()) {
 				next_task.idle();
@@ -1236,6 +1239,8 @@ BeesScanModeExtent::SizeTier::find_next_extent()
 		Task create_map_task(oss.str(), [sft, this_bytenr, hold_state, this_length, find_next_task]() {
 			sft->create_extent_map(this_bytenr, hold_state, this_length, find_next_task);
 			BEESCOUNT(crawl_extent);
+			// The crawl found something to do, so its state is worth saving
+			sft->m_bsme->m_roots->crawl_state_set_work();
 		});
 		create_map_task.run();
 
@@ -1540,7 +1545,7 @@ BeesRoots::state_to_stream(ostream &ofs)
 }
 
 void
-BeesRoots::state_save()
+BeesRoots::state_save(const bool force)
 {
 	BEESNOTE("saving crawl state");
 	BEESLOGINFO("Saving crawl state");
@@ -1558,12 +1563,28 @@ BeesRoots::state_save()
 		return;
 	}
 
+	// Every crawl starts a new transid window whenever the transid changes,
+	// which changes the crawl state.  If no crawl found an extent to scan
+	// since the last save, all those windows were empty, and the state on
+	// disk is still a correct place to resume from.  Saving it anyway would
+	// be a new transaction, which bees then sees as a new transid: on a
+	// quiet filesystem that kept bees and the disk awake every
+	// BEES_WRITEBACK_INTERVAL for nothing.
+	// (No event counter here: a counter that changes on an idle filesystem
+	// would make the hourly stats file look new, and that is a write too.)
+	if (!force && m_crawl_work == m_crawl_work_saved) {
+		BEESLOGINFO("No extents found since last save, not saving crawl state");
+		return;
+	}
+
 	state_to_stream(ofs);
 	const auto crawl_saved = m_crawl_dirty;
+	const auto crawl_work_saved = m_crawl_work;
 
 	if (ofs.str().empty()) {
 		BEESLOGWARN("Crawl state empty!");
 		m_crawl_clean = crawl_saved;
+		m_crawl_work_saved = crawl_work_saved;
 		return;
 	}
 
@@ -1576,6 +1597,7 @@ BeesRoots::state_save()
 	lock.lock();
 	// This records the version of the crawl state we saved, which is not necessarily the current state
 	m_crawl_clean = crawl_saved;
+	m_crawl_work_saved = crawl_work_saved;
 	BEESLOGINFO("Saved crawl state in " << save_time << "s");
 }
 
@@ -1584,6 +1606,13 @@ BeesRoots::crawl_state_set_dirty()
 {
 	unique_lock<mutex> lock(m_mutex);
 	++m_crawl_dirty;
+}
+
+void
+BeesRoots::crawl_state_set_work()
+{
+	unique_lock<mutex> lock(m_mutex);
+	++m_crawl_work;
 }
 
 void
@@ -1769,6 +1798,8 @@ BeesFileCrawl::scan_one_ref()
 					} );
 					if (!scan_again) {
 						m_hold = new_holder;
+						// The crawl position moved, so the crawl state is worth saving
+						m_roots->crawl_state_set_work();
 					} else {
 						BEESCOUNT(crawl_again);
 					}
@@ -1865,7 +1896,7 @@ BeesRoots::writeback_thread()
 			BEESLOGDEBUG("Stop requested in writeback thread");
 			catch_all([&]() {
 				BEESNOTE("flushing crawler state");
-				state_save();
+				state_save(true);
 			});
 			return;
 		}
@@ -2519,6 +2550,8 @@ BeesCrawl::fetch_extents()
 	new_state.m_objectid = max(m_next_extent_data.objectid() + m_btof.scale_size(), m_next_extent_data.objectid());
 	new_state.m_offset = 0;
 	set_state(new_state);
+	// Found something to scan, so the crawl state is worth saving
+	m_ctx->roots()->crawl_state_set_work();
 	return true;
 }
 
