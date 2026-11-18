@@ -818,6 +818,7 @@ bees_main(int argc, char *argv[])
 	bool workaround_btrfs_send = false;
 	bool keep_prealloc = false;
 	bool hash_mlock = true;
+	double settle_delay = 0;
 	double status_interval = BEES_STATUS_INTERVAL;
 	BeesRoots::ScanMode root_scan_mode = BeesRoots::SCAN_MODE_EXTENT;
 
@@ -826,6 +827,7 @@ bees_main(int argc, char *argv[])
 	enum {
 		BEES_OPT_THROTTLE_FACTOR = 256,
 		BEES_OPT_KEEP_PREALLOC,
+		BEES_OPT_SETTLE_DELAY,
 		BEES_OPT_STATUS_INTERVAL,
 		BEES_OPT_NO_MLOCK,
 	};
@@ -833,6 +835,7 @@ bees_main(int argc, char *argv[])
 		{ .name = "thread-factor",         .has_arg = required_argument, .val = 'C' },
 		{ .name = "throttle-factor",       .has_arg = required_argument, .val = BEES_OPT_THROTTLE_FACTOR },
 		{ .name = "keep-prealloc",         .has_arg = no_argument,       .val = BEES_OPT_KEEP_PREALLOC },
+		{ .name = "settle-delay",          .has_arg = required_argument, .val = BEES_OPT_SETTLE_DELAY },
 		{ .name = "status-interval",       .has_arg = required_argument, .val = BEES_OPT_STATUS_INTERVAL },
 		{ .name = "no-mlock",              .has_arg = no_argument,       .val = BEES_OPT_NO_MLOCK },
 		{ .name = "thread-min",            .has_arg = required_argument, .val = 'G' },
@@ -888,6 +891,10 @@ bees_main(int argc, char *argv[])
 				break;
 			case BEES_OPT_KEEP_PREALLOC:
 				keep_prealloc = true;
+				break;
+			case BEES_OPT_SETTLE_DELAY:
+				settle_delay = stod(optarg);
+				THROW_CHECK1(out_of_range, settle_delay, settle_delay >= 0);
 				break;
 			case BEES_OPT_STATUS_INTERVAL:
 				status_interval = stod(optarg);
@@ -1004,6 +1011,9 @@ bees_main(int argc, char *argv[])
 
 	// How often to write $BEESSTATUS
 	bc->set_status_interval(status_interval);
+
+	// Wait for new data to settle before scanning it
+	bc->roots()->set_settle_delay(settle_delay);
 
 	// Set root scan mode
 	bc->roots()->set_scan_mode(root_scan_mode);

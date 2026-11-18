@@ -12,6 +12,7 @@
 #include "crucible/task.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <tuple>
 
@@ -90,6 +91,14 @@ BeesCrawlState::operator<(const BeesCrawlState &that) const
 {
 	return tie(m_min_transid, m_max_transid, m_objectid, m_offset, m_root)
 		< tie(that.m_min_transid, that.m_max_transid, that.m_objectid, that.m_offset, that.m_root);
+}
+
+/// Clock for the settle delay, in seconds.  Monotonic; does not count time spent suspended.
+static
+double
+settle_clock()
+{
+	return chrono::duration<double>(chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 static
@@ -937,7 +946,9 @@ BeesScanModeExtent::init_tasks()
 			BeesCrawlState new_bcs;
 			new_bcs.m_root = subvol;
 			new_bcs.m_min_transid = m_roots->transid_min();
-			new_bcs.m_max_transid = m_roots->transid_max();
+			new_bcs.m_max_transid = m_roots->transid_scan_max();
+			// A crawl up to transid 0 would walk the whole extent tree and find nothing
+			THROW_CHECK1(runtime_error, new_bcs.m_max_transid, new_bcs.m_max_transid > 0);
 			const auto this_crawl = m_roots->insert_root(new_bcs);
 			lock.lock();
 			const auto new_size_tier = make_shared<SizeTier>(dynamic_pointer_cast<BeesScanModeExtent>(shared_from_this()), subvol, magic);
@@ -1678,7 +1689,41 @@ BeesRoots::transid_max_nocache()
 
 	// Update the rate estimator
 	m_transid_re.update(rv);
+
+	// The settle delay needs a transid that is certainly committed.
+	// rv is not: it is the transid of the metadata page that holds the
+	// extent tree's root item, and that page is also rewritten in the
+	// middle of a transaction (e.g. when a subvol is created).
+	// The generation inside the root item only changes during a commit,
+	// after the last data extent of that transaction is in the extent tree.
+	if (m_settle_delay > 0) {
+		const auto committed = bti.root_generation();
+		unique_lock<mutex> lock(m_settle_mutex);
+		m_settle_history.update(committed, settle_clock());
+	}
 	return rv;
+}
+
+void
+BeesRoots::set_settle_delay(const double seconds)
+{
+	THROW_CHECK1(invalid_argument, seconds, seconds >= 0);
+	m_settle_delay = seconds;
+	if (m_settle_delay > 0) {
+		BEESLOGINFO("settle delay " << m_settle_delay << "s: not scanning newer data");
+	} else {
+		BEESLOGINFO("settle delay disabled");
+	}
+}
+
+uint64_t
+BeesRoots::transid_scan_max()
+{
+	if (m_settle_delay > 0) {
+		unique_lock<mutex> lock(m_settle_mutex);
+		return m_settle_history.settled(settle_clock(), m_settle_delay);
+	}
+	return transid_max();
 }
 
 uint64_t
@@ -1846,6 +1891,7 @@ BeesRoots::crawl_thread()
 	// Monitor transid_max and wake up roots when it changes
 	BEESNOTE("tracking transid");
 	uint64_t last_transid = 0;
+	uint64_t last_scan_transid = 0;
 	while (!m_stop_requested) {
 		BEESTRACE("Measure current transid");
 		catch_all([&]() {
@@ -1862,15 +1908,39 @@ BeesRoots::crawl_thread()
 			// Even open files are a problem if they're big enough.
 			// Always run this even if we have no worker threads.
 			clear_caches();
+		}
+		last_transid = new_transid;
 
+		// The scanners follow the transid that crawls may scan up to.
+		// Without a settle delay that is the transid we just read.
+		// With one, it is a transid that was committed at least the
+		// delay ago, and it changes without the filesystem's help.
+		// It is 0 after startup until the first transid has settled,
+		// and the scanners are not started before that.
+		auto new_scan_transid = new_transid;
+		if (m_settle_delay > 0) {
+			const auto now = settle_clock();
+			unique_lock<mutex> lock(m_settle_mutex);
+			new_scan_transid = m_settle_history.settled(now, m_settle_delay);
+		}
+		if (new_scan_transid != last_scan_transid) {
 			// Insert new roots and restart crawl_more.
 			crawl_new.run();
 			// The status is about to change
 			m_ctx->status_wake();
 		}
-		last_transid = new_transid;
+		last_scan_transid = new_scan_transid;
 
-		const auto poll_time = max(BEES_TRANSID_POLL_INTERVAL, m_transid_re.seconds_for(1));
+		auto poll_time = max(BEES_TRANSID_POLL_INTERVAL, m_transid_re.seconds_for(1));
+		if (m_settle_delay > 0) {
+			// Wake up when the next transid settles.  If none is waiting, there is nothing to wake up for.
+			const auto now = settle_clock();
+			unique_lock<mutex> lock(m_settle_mutex);
+			const auto settle_wait = m_settle_history.next_change(now, m_settle_delay);
+			if (settle_wait >= 0) {
+				poll_time = min(poll_time, settle_wait);
+			}
+		}
 		BEESLOGDEBUG("Polling " << poll_time << "s for next transid " << m_transid_re);
 		BEESNOTE("waiting " << poll_time << "s for next transid " << m_transid_re);
 		unique_lock<mutex> lock(m_stop_mutex);
@@ -1931,7 +2001,7 @@ BeesRoots::insert_new_crawl()
 	// Avoid a wasted loop iteration by starting from root 5
 	new_bcs.m_root = BTRFS_FS_TREE_OBJECTID;
 	new_bcs.m_min_transid = transid_min();
-	new_bcs.m_max_transid = transid_max();
+	new_bcs.m_max_transid = transid_scan_max();
 
 	unique_lock<mutex> lock(m_mutex);
 	set<uint64_t> excess_roots;
@@ -2432,8 +2502,9 @@ BeesCrawl::BeesCrawl(shared_ptr<BeesContext> ctx, BeesCrawlState initial_state) 
 bool
 BeesRoots::up_to_date(const BeesCrawlState &bcs)
 {
-	// If we are already at transid_max then we are up to date
-	return bcs.m_max_transid >= transid_max();
+	// If we are already at transid_max then we are up to date.
+	// With a settle delay, at the newest transid that is old enough to scan.
+	return bcs.m_max_transid >= transid_scan_max();
 }
 
 bool
@@ -2453,7 +2524,7 @@ BeesCrawl::restart_crawl_unlocked()
 
 		// Start new crawl
 		crawl_state.m_min_transid = crawl_state.m_max_transid;
-		crawl_state.m_max_transid = roots->transid_max();
+		crawl_state.m_max_transid = roots->transid_scan_max();
 		crawl_state.m_objectid = 0;
 		crawl_state.m_offset = 0;
 		crawl_state.m_started = current_time;
@@ -2513,7 +2584,7 @@ BeesCrawl::fetch_extents()
 			// been not running for a long time).
 			// Don't allow transid_max to ever move backwards.
 			const auto roots = m_ctx->roots();
-			const auto next_transid = roots->transid_max();
+			const auto next_transid = roots->transid_scan_max();
 			const auto current_time = time(NULL);
 			crawl_state.m_max_transid = max(next_transid, crawl_state.m_max_transid);
 			// Move the start time forward too, since we have not started crawling yet.

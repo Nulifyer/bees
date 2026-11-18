@@ -15,6 +15,8 @@
 #include "crucible/time.h"
 #include "crucible/task.h"
 
+#include "bees-settle.h"
+
 #include <atomic>
 #include <functional>
 #include <list>
@@ -579,6 +581,11 @@ class BeesRoots : public enable_shared_from_this<BeesRoots> {
 	RateEstimator				m_transid_re;
 	bool					m_workaround_btrfs_send = false;
 
+	/// Settle delay in seconds, 0 to scan every transid as soon as it is seen
+	double					m_settle_delay = 0;
+	mutex					m_settle_mutex;
+	BeesSettleHistory			m_settle_history;
+
 	shared_ptr<BeesScanMode>		m_scanner;
 
 	mutex					m_tmpfiles_mutex;
@@ -638,9 +645,15 @@ public:
 
 	void set_scan_mode(ScanMode new_mode);
 	void set_workaround_btrfs_send(bool do_avoid);
+	void set_settle_delay(double seconds);
+	double settle_delay() const { return m_settle_delay; }
 
 	uint64_t transid_min();
 	uint64_t transid_max();
+
+	/// Newest transid a crawl may include: transid_max() without a settle delay,
+	/// otherwise the newest transid that is at least that old (0 if none is yet).
+	uint64_t transid_scan_max();
 
 	/// A crawl found an extent to scan, or finished one: the crawl state is worth saving
 	void crawl_state_set_work();

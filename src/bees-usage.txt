@@ -19,6 +19,8 @@ Load management options:
 
 Filesystem tree traversal options:
     -m, --scan-mode       Scanning mode (0..4, default 4)
+        --settle-delay    Seconds that new data must be left alone before
+                          it is scanned (default 0: scan it at once)
 
 Extent handling options:
         --keep-prealloc   Leave preallocated extents alone

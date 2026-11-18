@@ -92,6 +92,36 @@ more than bees' speed, e.g. on a desktop or laptop with compressed swap.
  For details of the different scanning modes and the default value of
  this option, see [bees configuration](config.md).
 
+* `--settle-delay SECONDS`
+
+ Do not scan new data until it has been left alone for `SECONDS`.
+ Default is 0: scan data as soon as its transaction is committed.
+
+ Without this option bees reads, hashes and dedupes build output, package
+extraction and caches that are deleted or rewritten minutes later, and
+it dedupes files that are still being written, which makes the kernel
+flush and lock them.  With a settle delay:
+
+  * bees scans only up to the newest transid that it saw committed at
+    least `SECONDS` ago.  Data that is deleted or overwritten before it
+    is that old is never looked up, opened or read.
+
+ Nothing is skipped because of the delay, only postponed: the crawl
+position saved in `beescrawl.dat` never moves past data that is still
+waiting, so bees picks it up after a restart or a crash.  The times
+are not saved, so after every start bees waits `SECONDS` before it
+scans anything.  The space that duplicates use is freed `SECONDS`
+later than without the option.
+
+ The delay costs no wakeups on an idle filesystem.  bees polls for new
+transactions as usual (every 30 seconds or less often), so data can
+wait up to one polling interval longer than `SECONDS`.  A delay
+shorter than the filesystem's commit interval (30 seconds by default)
+is of little use.
+
+ A file that was scanned earlier can still be opened as the _source_
+ of a dedupe while it is being changed.
+
 ## Extent handling options
 
 * `--keep-prealloc`

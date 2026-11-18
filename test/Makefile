@@ -10,6 +10,7 @@ PROGRAMS = \
 	process \
 	progress \
 	seeker \
+	settle \
 	table \
 	task \
 
