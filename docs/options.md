@@ -139,3 +139,14 @@ space used--until the read-only snapshots are deleted.
 * `--verbose` or `-v`
 
  Set log verbosity (0 = no output, 8 = all output, default 8).
+
+* `--status-interval SECONDS`
+
+ Write the status file `$BEESSTATUS` at most every `SECONDS` (default 1).
+ 0 disables the status file even if `$BEESSTATUS` is set.
+
+ The file is rewritten when an event counter, the work queue or the
+progress table changed.  While nothing changes, bees checks less and
+less often and rewrites the file once a minute (or every `SECONDS`, if
+that is longer), so the thread ages in the file can be that much out
+of date when bees is idle or stuck.

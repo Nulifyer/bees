@@ -817,6 +817,7 @@ bees_main(int argc, char *argv[])
 	double load_target = 0;
 	bool workaround_btrfs_send = false;
 	bool keep_prealloc = false;
+	double status_interval = BEES_STATUS_INTERVAL;
 	BeesRoots::ScanMode root_scan_mode = BeesRoots::SCAN_MODE_EXTENT;
 
 	// Configure getopt_long
@@ -824,11 +825,13 @@ bees_main(int argc, char *argv[])
 	enum {
 		BEES_OPT_THROTTLE_FACTOR = 256,
 		BEES_OPT_KEEP_PREALLOC,
+		BEES_OPT_STATUS_INTERVAL,
 	};
 	static const struct option long_options[] = {
 		{ .name = "thread-factor",         .has_arg = required_argument, .val = 'C' },
 		{ .name = "throttle-factor",       .has_arg = required_argument, .val = BEES_OPT_THROTTLE_FACTOR },
 		{ .name = "keep-prealloc",         .has_arg = no_argument,       .val = BEES_OPT_KEEP_PREALLOC },
+		{ .name = "status-interval",       .has_arg = required_argument, .val = BEES_OPT_STATUS_INTERVAL },
 		{ .name = "thread-min",            .has_arg = required_argument, .val = 'G' },
 		{ .name = "strip-paths",           .has_arg = no_argument,       .val = 'P' },
 		{ .name = "no-timestamps",         .has_arg = no_argument,       .val = 'T' },
@@ -882,6 +885,10 @@ bees_main(int argc, char *argv[])
 				break;
 			case BEES_OPT_KEEP_PREALLOC:
 				keep_prealloc = true;
+				break;
+			case BEES_OPT_STATUS_INTERVAL:
+				status_interval = stod(optarg);
+				THROW_CHECK1(out_of_range, status_interval, status_interval >= 0);
 				break;
 			case 'G':
 				thread_min = stoul(optarg);
@@ -985,6 +992,9 @@ bees_main(int argc, char *argv[])
 
 	// Keep or replace prealloc extents
 	bc->set_keep_prealloc(keep_prealloc);
+
+	// How often to write $BEESSTATUS
+	bc->set_status_interval(status_interval);
 
 	// Set root scan mode
 	bc->roots()->set_scan_mode(root_scan_mode);

@@ -1865,6 +1865,8 @@ BeesRoots::crawl_thread()
 
 			// Insert new roots and restart crawl_more.
 			crawl_new.run();
+			// The status is about to change
+			m_ctx->status_wake();
 		}
 		last_transid = new_transid;
 

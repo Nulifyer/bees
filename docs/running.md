@@ -60,6 +60,10 @@ There are some runtime configurable options using environment variables:
 
         watch -n1 cat $BEESSTATUS
 
+  The file is written once a second while bees is working, and once a
+  minute while nothing changes (see `--status-interval` in
+  [options](options.md)).
+
 Other options (e.g. interval between filesystem crawls) can be configured
 in `src/bees.h` or [on the command line](options.md).
 

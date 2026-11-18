@@ -80,6 +80,9 @@ const int BEES_PROGRESS_INTERVAL = BEES_STATS_INTERVAL;
 // Status is output every freakin second.  Use a ramdisk.
 const int BEES_STATUS_INTERVAL = 1;
 
+// While nothing in the status changes, check for changes less and less often, up to this many seconds apart
+const double BEES_STATUS_IDLE_INTERVAL = 60;
+
 // Number of file FDs to cache when not in active use
 const size_t BEES_FILE_FD_CACHE_SIZE = 524288;
 
@@ -775,6 +778,9 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 	condition_variable				m_stop_condvar;
 	bool						m_stop_requested = false;
 	bool						m_stop_status = false;
+	condition_variable				m_status_condvar;
+	bool						m_status_wake = false;
+	double						m_status_interval = BEES_STATUS_INTERVAL;
 
 	shared_ptr<BeesThread>				m_progress_thread;
 	shared_ptr<BeesThread>				m_status_thread;
@@ -795,6 +801,7 @@ public:
 
 	void set_root_path(string path);
 	void set_keep_prealloc(bool keep);
+	void set_status_interval(double seconds);
 
 	Fd root_fd() const { return m_root_fd; }
 	Fd home_fd();
@@ -822,6 +829,8 @@ public:
 	void resolve_cache_clear();
 
 	void dump_status();
+	/// Have the status file checked now instead of at the end of its idle wait
+	void status_wake();
 	void show_progress();
 	void set_progress(const string &str);
 	string get_progress();

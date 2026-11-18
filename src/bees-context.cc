@@ -70,14 +70,57 @@ BeesContext::dump_status()
 {
 	auto status_charp = getenv("BEESSTATUS");
 	if (!status_charp) return;
+	if (m_status_interval <= 0) {
+		BEESLOGINFO("Not writing a status file (--status-interval 0)");
+		return;
+	}
 	string status_file(status_charp);
-	BEESLOGINFO("Writing status to file '" << status_file << "' every " << BEES_STATUS_INTERVAL << " sec");
+	BEESLOGINFO("Writing status to file '" << status_file << "' every " << m_status_interval << " sec while it changes");
 	Timer total_timer;
+	// The status is written when something in it changed that doesn't
+	// change by itself (thread ages and average rates do).  While nothing
+	// changes we look less and less often, and write the file only once
+	// per idle interval so the thread ages in it don't get too old.
+	// An idle bees isn't woken up every second to rewrite the same file.
+	const double idle_interval = max(BEES_STATUS_IDLE_INTERVAL, m_status_interval);
+	string last_written;
+	double wait_time = m_status_interval;
+	bool write_now = true;
 	while (!m_stop_status) {
+		BEESNOTE("checking status for file '" << status_file << "'");
+
+		auto thisStats = BeesStats::s_global;
+		const auto progress_str = get_progress();
+		ostringstream changes_oss;
+		changes_oss << thisStats << "\n" << TaskMaster::get_queue_count() << " " << Task::instance_count() << " " << TaskMaster::get_thread_count() << "\n" << progress_str;
+		const auto changes = changes_oss.str();
+		if (changes != last_written) {
+			wait_time = m_status_interval;
+			write_now = true;
+		} else {
+			wait_time = min(wait_time * 2, idle_interval);
+		}
+		if (!write_now && wait_time < idle_interval) {
+			BEESNOTE("idle " << wait_time);
+			unique_lock<mutex> lock(m_stop_mutex);
+			if (m_stop_status) {
+				return;
+			}
+			if (m_status_condvar.wait_for(lock, chrono::duration<double>(wait_time), [&]() { return m_status_wake || m_stop_status; })) {
+				// Woken up: something is about to change, so look often again.
+				// When stopping, say so in the file whether anything changed or not.
+				wait_time = m_status_interval / 2;
+				write_now = m_stop_requested;
+			}
+			m_status_wake = false;
+			continue;
+		}
+		last_written = changes;
+		write_now = false;
+
 		BEESNOTE("writing status to file '" << status_file << "'");
 		ofstream ofs(status_file + ".tmp");
 
-		auto thisStats = BeesStats::s_global;
 		ofs << "TOTAL:\n";
 		ofs << "\t" << thisStats << "\n";
 		auto avg_rates = thisStats / total_timer.age();
@@ -98,20 +141,39 @@ BeesContext::dump_status()
 #endif
 
 		ofs << "PROGRESS:\n";
-		ofs << get_progress();
+		ofs << progress_str;
 
 		ofs.close();
 
 		BEESNOTE("renaming status file '" << status_file << "'");
 		rename((status_file + ".tmp").c_str(), status_file.c_str());
 
-		BEESNOTE("idle " << BEES_STATUS_INTERVAL);
+		BEESNOTE("idle " << wait_time);
 		unique_lock<mutex> lock(m_stop_mutex);
 		if (m_stop_status) {
 			return;
 		}
-		m_stop_condvar.wait_for(lock, chrono::duration<double>(BEES_STATUS_INTERVAL));
+		if (m_status_condvar.wait_for(lock, chrono::duration<double>(wait_time), [&]() { return m_status_wake || m_stop_status; })) {
+			wait_time = m_status_interval / 2;
+			write_now = m_stop_requested;
+		}
+		m_status_wake = false;
 	}
+}
+
+void
+BeesContext::status_wake()
+{
+	unique_lock<mutex> lock(m_stop_mutex);
+	m_status_wake = true;
+	m_status_condvar.notify_all();
+}
+
+void
+BeesContext::set_status_interval(const double seconds)
+{
+	THROW_CHECK1(invalid_argument, seconds, seconds >= 0);
+	m_status_interval = seconds;
 }
 
 void
@@ -1231,14 +1293,15 @@ BeesContext::stop()
 	// Write status once with this message...
 	BEESNOTE("stopping status thread at " << stop_timer << " sec");
 	lock.lock();
-	m_stop_condvar.notify_all();
+	m_status_wake = true;
+	m_status_condvar.notify_all();
 	lock.unlock();
 
 	// then wake the thread up one more time to exit the while loop
 	BEESLOGDEBUG("Waiting for status thread");
 	lock.lock();
 	m_stop_status = true;
-	m_stop_condvar.notify_all();
+	m_status_condvar.notify_all();
 	lock.unlock();
 	m_status_thread->join();
 
