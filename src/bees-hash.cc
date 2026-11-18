@@ -151,12 +151,19 @@ BeesHashTable::flush_dirty_extent(uint64_t extent_index)
 }
 
 size_t
-BeesHashTable::flush_dirty_extents(bool slowly)
+BeesHashTable::flush_dirty_extents(size_t &failed_extents, const bool stop_early)
 {
 	THROW_CHECK1(runtime_error, m_buckets, m_buckets > 0);
 
 	uint64_t wrote_extents = 0;
+	failed_extents = 0;
 	for (size_t extent_index = 0; extent_index < m_extents; ++extent_index) {
+		// Writing a large table takes a while, and bees should stop when told to.
+		// The extents we don't get to stay dirty and the journal still has their changes.
+		if (stop_early && m_stop_requested) {
+			THROW_ERROR(runtime_error, "stop requested after writing " << wrote_extents << " hash table extents, keeping the journal");
+		}
+
 		// Skip the clean ones
 		auto lock = lock_extent_by_index(extent_index);
 		if (!m_extent_metadata.at(extent_index).m_dirty) {
@@ -166,16 +173,8 @@ BeesHashTable::flush_dirty_extents(bool slowly)
 
 		if (flush_dirty_extent(extent_index)) {
 			++wrote_extents;
-			if (slowly) {
-				if (m_stop_requested) {
-					slowly = false;
-					continue;
-				}
-				BEESNOTE("flush rate limited after extent #" << extent_index << " of " << m_extents << " extents");
-				chrono::duration<double> sleep_time(m_flush_rate_limit.sleep_time(BLOCK_SIZE_HASHTAB_EXTENT));
-				unique_lock<mutex> lock(m_stop_mutex);
-				m_stop_condvar.wait_for(lock, sleep_time);
-			}
+		} else {
+			++failed_extents;
 		}
 	}
 	BEESLOGINFO("Flushed " << wrote_extents << " of " << m_extents << " hash table extents");
@@ -188,55 +187,287 @@ BeesHashTable::set_extent_dirty_locked(uint64_t extent_index)
 	// Must already be locked
 	m_extent_metadata.at(extent_index).m_dirty = true;
 	++m_extent_metadata.at(extent_index).m_dirty_gen;
+}
 
-	// Signal writeback thread
-	unique_lock<mutex> dirty_lock(m_dirty_mutex);
-	m_dirty = true;
-	m_dirty_condvar.notify_one();
+/// Record a change to the table for the journal.  Call with the extent of
+/// `hash` locked, after the change, so that changes to one bucket are
+/// recorded in the order they were made.
+void
+BeesHashTable::journal_add_locked(const bees_hash_journal::Op op, const HashType hash, const AddrType addr)
+{
+	// Changes made while the journal is replayed came out of the journal
+	if (m_journal_replaying) {
+		return;
+	}
+	// Lookups ignore such addresses, and the journal has no way to store them
+	if (addr < bees_hash_journal::MIN_ADDR) {
+		return;
+	}
+	unique_lock<mutex> lock(m_journal_mutex);
+	if (m_journal_records.empty()) {
+		// The writeback thread sleeps without a timeout while there is nothing to write
+		m_journal_timer.reset();
+		m_journal_condvar.notify_all();
+	}
+	m_journal_records.push_back(bees_hash_journal::Record { .m_op = op, .m_hash = hash, .m_addr = addr });
+	if (m_journal_records.size() == BEES_HASH_JOURNAL_BATCH) {
+		m_journal_condvar.notify_all();
+	}
+}
+
+/// Append the waiting changes to the journal file as one batch.
+/// Call with m_flush_mutex locked.  With sync, don't return before the
+/// journal file is on disk (that includes batches written earlier without).
+/// If this throws, the changes are no longer waiting and are not in the
+/// journal: m_journal_lost is set, and only checkpoint_locked saves them.
+void
+BeesHashTable::journal_write_locked(const bool sync)
+{
+	BEESNOTE("writing hash table journal");
+	vector<bees_hash_journal::Record> records;
+	bool was_lost = false;
+	{
+		unique_lock<mutex> lock(m_journal_mutex);
+		records.swap(m_journal_records);
+		was_lost = m_journal_lost;
+		// Until these records are in the file they are nowhere but in the table
+		// in memory.  If we don't get to the end of this function, that's how it stays.
+		if (!records.empty()) {
+			m_journal_lost = true;
+		}
+	}
+	// The journal gets far over its limit when beeshash.dat can't be written,
+	// most likely because the disk is full.  Don't fill it further.
+	if (!records.empty() && m_table_write_failed && m_journal_size >= 2 * m_journal_limit) {
+		THROW_ERROR(runtime_error, "hash table journal is " << pretty(m_journal_size) << ", limit " << pretty(m_journal_limit) << ", not writing " << records.size() << " changes to it");
+	}
+	// A batch has a maximum size, and there is no reason to build a huge one in memory
+	const size_t max_records = 1024 * 1024;
+	static_assert(max_records * 2 <= bees_hash_journal::MAX_BATCH_CELLS, "a batch of max_records must be decodable");
+	for (size_t first = 0; first < records.size(); first += max_records) {
+		const size_t last = min(records.size(), first + max_records);
+		const auto batch = bees_hash_journal::encode(records.data() + first, records.data() + last);
+		BEESTOOLONG("pwrite(fd " << m_journal_fd << " '" << name_fd(m_journal_fd) << "', length " << to_hex(batch.size()) << ", offset " << to_hex(m_journal_size) << ")");
+		pwrite_or_die(m_journal_fd, batch.data(), batch.size(), m_journal_size);
+		m_journal_size += batch.size();
+		BEESCOUNT(hash_journal_out);
+		BEESCOUNTADD(hash_journal_records, last - first);
+		BEESCOUNTADD(hash_journal_bytes, batch.size());
+	}
+	if (sync) {
+		BEESTOOLONG("fdatasync(fd " << m_journal_fd << " '" << name_fd(m_journal_fd) << "')");
+		DIE_IF_NON_ZERO(fdatasync(m_journal_fd));
+	}
+	unique_lock<mutex> lock(m_journal_mutex);
+	// Nothing else can have changed this in the meantime: we hold m_flush_mutex
+	m_journal_lost = was_lost;
+	if (m_journal_size >= m_journal_limit && !m_checkpoint_wanted) {
+		m_checkpoint_wanted = true;
+		m_journal_condvar.notify_all();
+	}
+}
+
+/// Write the dirty extents of the table to beeshash.dat and start the
+/// journal over.  Call with m_flush_mutex locked.  Throws if the table
+/// could not be written, or if stop_early and bees is told to stop meanwhile;
+/// then the journal is left as it is.
+void
+BeesHashTable::checkpoint_locked(const bool stop_early)
+{
+	BEESNOTE("writing hash table, journal size " << pretty(m_journal_size));
+	Timer checkpoint_timer;
+
+	// Everything the journal file holds now is in the table in memory.
+	// Changes made from here on stay in m_journal_records until the next
+	// journal write, whether the extents written below have them or not.
+	// A change that was dropped before now is in a dirty extent.
+	size_t failed_extents = 0;
+	const auto wrote_extents = flush_dirty_extents(failed_extents, stop_early);
+	if (failed_extents) {
+		m_table_write_failed = true;
+		THROW_ERROR(runtime_error, "could not write " << failed_extents << " hash table extents, keeping the journal");
+	}
+
+	// The journal must not go before the table is safely on disk
+	{
+		BEESTOOLONG("fdatasync(fd " << m_fd << " '" << name_fd(m_fd) << "')");
+		m_table_write_failed = true;
+		DIE_IF_NON_ZERO(fdatasync(m_fd));
+		m_table_write_failed = false;
+	}
+	ftruncate_or_die(m_journal_fd, 0);
+	m_journal_size = 0;
+	BEESCOUNT(hash_checkpoint);
+
+	unique_lock<mutex> lock(m_journal_mutex);
+	m_checkpoint_wanted = false;
+	// Dropped changes were in dirty extents, and those are written now.
+	// (A journal write can't have failed since: we hold m_flush_mutex.)
+	m_journal_lost = false;
+	lock.unlock();
+	BEESLOGINFO("Wrote " << wrote_extents << " of " << m_extents << " hash table extents in " << checkpoint_timer << "s, journal starts over");
+}
+
+void
+BeesHashTable::flush()
+{
+	BEESNOTE("flushing hash table journal");
+	unique_lock<mutex> flush_lock(m_flush_mutex);
+	// If a batch was dropped earlier, the journal is not the whole truth.
+	// Write the table itself; if that fails too, the caller must not go on.
+	bool lost = false;
+	try {
+		journal_write_locked(true);
+	} catch (...) {
+		lost = true;
+	}
+	if (!lost) {
+		unique_lock<mutex> lock(m_journal_mutex);
+		lost = m_journal_lost;
+	}
+	if (lost) {
+		BEESLOGWARN("hash table journal could not be written, writing the hash table instead");
+		BEESCOUNT(hash_journal_error);
+		checkpoint_locked(false);
+	}
 }
 
 void
 BeesHashTable::writeback_loop()
 {
 	while (!m_stop_requested) {
-		auto wrote_extents = flush_dirty_extents(true);
-
-		BEESNOTE("idle after writing " << wrote_extents << " of " << m_extents << " extents");
-
-		unique_lock<mutex> lock(m_dirty_mutex);
+		bool checkpoint = false;
+		{
+			// Sleep until there is a batch to write, the oldest change has waited long enough,
+			// or beeshash.dat is due.  Nothing to write: nothing to wake up for.
+			unique_lock<mutex> lock(m_journal_mutex);
+			while (!m_stop_requested) {
+				if (m_checkpoint_wanted) {
+					checkpoint = true;
+					break;
+				}
+				if (m_journal_records.empty()) {
+					BEESNOTE("idle, nothing to write");
+					m_journal_condvar.wait(lock);
+					continue;
+				}
+				if (m_journal_records.size() >= BEES_HASH_JOURNAL_BATCH) {
+					break;
+				}
+				const double wait_time = BEES_HASH_JOURNAL_DELAY - m_journal_timer.age();
+				if (wait_time <= 0) {
+					break;
+				}
+				BEESNOTE("idle, " << m_journal_records.size() << " changes waiting for " << wait_time << "s more");
+				m_journal_condvar.wait_for(lock, chrono::duration<double>(wait_time));
+			}
+		}
 		if (m_stop_requested) {
 			break;
 		}
-		if (m_dirty) {
-			m_dirty = false;
-		} else {
-			m_dirty_condvar.wait(lock);
+
+		bool failed = true;
+		catch_all([&]() {
+			unique_lock<mutex> flush_lock(m_flush_mutex);
+			journal_write_locked(false);
+			if (checkpoint) {
+				checkpoint_locked(true);
+			}
+			failed = false;
+		});
+		if (failed && !m_stop_requested) {
+			// The changes are still in memory.  Don't hammer a disk that is full or failing.
+			BEESCOUNT(hash_journal_error);
+			{
+				unique_lock<mutex> lock(m_journal_mutex);
+				m_checkpoint_wanted = true;
+			}
+			BEESNOTE("hash table write failed, waiting " << BEES_HASH_WRITE_RETRY << "s");
+			unique_lock<mutex> lock(m_stop_mutex);
+			if (!m_stop_requested) {
+				m_stop_condvar.wait_for(lock, chrono::duration<double>(BEES_HASH_WRITE_RETRY));
+			}
 		}
 	}
 
-	// The normal loop exits at the end of one iteration when stop requested,
-	// but stop request will be in the middle of the loop, and some extents
-	// will still be dirty.  Run the flush loop again to get those.
-	BEESNOTE("flushing hash table, round 2");
-	BEESLOGDEBUG("Flushing hash table");
-	flush_dirty_extents(false);
-
-	// If there were any Tasks still running, they may have updated
-	// some hash table pages during the second flush.  These updates
-	// will be lost.  The Tasks will be repeated on the next run because
-	// they were not completed prior to the stop request, and the
-	// Crawl progress was already flushed out before the Hash table
-	// started writing, so nothing is really lost here.
-
+	// Stop requested.  The crawl state was saved, with everything up to then
+	// in the journal.  Write what the last running Tasks added since.
+	// If there were any Tasks still running, they may still update
+	// the hash table after this.  These updates will be lost.  The Tasks
+	// will be repeated on the next run because they were not completed
+	// prior to the stop request, so nothing is really lost here.
+	// The table itself is not written here: at the next start the journal
+	// is applied to it, and stopping stays quick however large the table is.
+	BEESNOTE("flushing hash table journal at exit");
+	BEESLOGDEBUG("Flushing hash table journal");
 	catch_all([&]() {
-		// trigger writeback on our way out
-#if 0
-		// seems to trigger huge latency spikes
-		BEESTOOLONG("unreadahead hash table size " <<
-		pretty(m_size)); bees_unreadahead(m_fd, 0, m_size);
-#endif
+		flush();
 	});
+
 	BEESLOGDEBUG("Exited hash table writeback_loop");
+}
+
+/// Open the journal and apply it to the table.  Called before any other
+/// thread uses the table.
+void
+BeesHashTable::journal_open()
+{
+	const string journal_name = "beeshash.journal";
+	BEESNOTE("opening hash table journal '" << journal_name << "'");
+	m_journal_fd = openat_or_die(m_ctx->home_fd(), journal_name, FLAGS_OPEN_FILE_RW | O_CREAT, 0600);
+	m_journal_limit = max(m_size / BEES_HASH_JOURNAL_FRACTION, min(m_size, BEES_HASH_JOURNAL_MIN_SIZE));
+
+	Stat st(m_journal_fd);
+	const uint64_t file_size = st.st_size;
+	Timer replay_timer;
+	uint64_t records = 0;
+	uint64_t good_size = 0;
+	bool replay_failed = true;
+	m_journal_replaying = true;
+	catch_all([&]() {
+		BEESNOTE("applying hash table journal, " << pretty(file_size));
+		good_size = bees_hash_journal::replay(file_size, [&](const uint64_t pos, const size_t len, uint8_t *const buf) {
+			pread_or_die(m_journal_fd, buf, len, pos);
+		}, [&](const uint64_t op, const HashType hash, AddrType addr) {
+			// Like an entry that comes from beeshash.dat, see fetch_missing_extent_by_index
+			addr &= ~BeesAddress::c_toxic_mask;
+			switch (op) {
+				case bees_hash_journal::OP_INSERT:
+					push_random_hash_addr(hash, addr);
+					break;
+				case bees_hash_journal::OP_FRONT:
+					push_front_hash_addr(hash, addr);
+					break;
+				case bees_hash_journal::OP_ERASE:
+					erase_hash_addr(hash, addr);
+					break;
+			}
+			++records;
+		});
+		replay_failed = false;
+	});
+	m_journal_replaying = false;
+	BEESCOUNTADD(hash_journal_replay, records);
+	if (replay_failed) {
+		// The journal could not be read to its end, so we don't know where it ends.
+		// What was applied is in memory in extents marked dirty.  Have the table
+		// written before anything relies on the journal, and start the journal over.
+		BEESLOGWARN("hash table journal could not be read, starting a new one");
+		BEESCOUNT(hash_journal_error);
+		m_journal_lost = true;
+		good_size = 0;
+	}
+	if (good_size < file_size) {
+		// A crash cut the last batch short.  New batches go where it began.
+		BEESLOGNOTICE("hash table journal: dropping " << (file_size - good_size) << " bytes after the last complete batch");
+		BEESCOUNT(hash_journal_torn);
+		catch_all([&]() {
+			ftruncate_or_die(m_journal_fd, good_size);
+		});
+	}
+	m_journal_size = good_size;
+	m_checkpoint_wanted = m_journal_lost || m_journal_size >= m_journal_limit;
+	BEESLOGINFO("hash table journal: applied " << records << " changes from " << pretty(good_size) << " in " << replay_timer << "s, limit " << pretty(m_journal_limit));
 }
 
 static
@@ -560,6 +791,7 @@ BeesHashTable::erase_hash_addr(HashType hash, AddrType addr)
 	if (found) {
 		*ip = Cell(0, 0);
 		set_extent_dirty_locked(hash_to_extent_index(hash));
+		journal_add_locked(bees_hash_journal::OP_ERASE, hash, addr);
 		BEESCOUNT(hash_erase);
 #if 0
 		if (verify_cell_range(er.first, er.second)) {
@@ -613,6 +845,7 @@ BeesHashTable::push_front_hash_addr(HashType hash, AddrType addr)
 	if (er.first[0] != mv) {
 		er.first[0] = mv;
 		set_extent_dirty_locked(hash_to_extent_index(hash));
+		journal_add_locked(bees_hash_journal::OP_FRONT, hash, addr);
 		BEESCOUNT(hash_front);
 	} else {
 		BEESCOUNT(hash_front_already);
@@ -707,6 +940,7 @@ BeesHashTable::push_random_hash_addr(HashType hash, AddrType addr)
 ret_dirty:
 	BEESCOUNT(hash_insert);
 	set_extent_dirty_locked(hash_to_extent_index(hash));
+	journal_add_locked(bees_hash_journal::OP_INSERT, hash, addr);
 ret:
 #if 0
 	if (verify_cell_range(er.first, er.second, false)) {
@@ -807,7 +1041,6 @@ BeesHashTable::BeesHashTable(shared_ptr<BeesContext> ctx, string filename, off_t
 	m_cells(0),
 	m_writeback_thread("hash_writeback"),
 	m_prefetch_thread("hash_prefetch"),
-	m_flush_rate_limit(BEES_FLUSH_RATE),
 	m_stats_file(m_ctx->home_fd(), "beesstats.txt")
 {
 	// Sanity checks to protect the implementation from its weaknesses
@@ -834,8 +1067,6 @@ BeesHashTable::BeesHashTable(shared_ptr<BeesContext> ctx, string filename, off_t
 	m_cells = m_buckets * c_cells_per_bucket;
 	m_extents = (m_size + BLOCK_SIZE_HASHTAB_EXTENT - 1) / BLOCK_SIZE_HASHTAB_EXTENT;
 	BEESLOGINFO("\tcells " << m_cells << ", buckets " << m_buckets << ", extents " << m_extents);
-
-	BEESLOGINFO("\tflush rate limit " << BEES_FLUSH_RATE);
 
 	// Try to mmap that much memory
 	try_mmap_flags(MAP_PRIVATE | MAP_ANONYMOUS);
@@ -869,6 +1100,9 @@ BeesHashTable::BeesHashTable(shared_ptr<BeesContext> ctx, string filename, off_t
 
 	m_extent_metadata.resize(m_extents);
 
+	// Bring the table up to date before anybody looks at it
+	journal_open();
+
 	m_writeback_thread.exec([&]() {
 		writeback_loop();
         });
@@ -891,6 +1125,8 @@ BeesHashTable::BeesHashTable(shared_ptr<BeesContext> ctx, string filename, off_t
 		if (root_info.fsid() != hash_info.fsid()) return;
 		// Hash is on the same one, blacklist it
 		m_ctx->blacklist_insert(BeesFileId(m_fd));
+		// The journal is next to it
+		m_ctx->blacklist_insert(BeesFileId(m_journal_fd));
 	});
 
 	// Each write of the stats file makes a new file.  Keep the current one blacklisted.
@@ -932,9 +1168,9 @@ BeesHashTable::stop_request()
 	lock.unlock();
 
 	// Wake up hash writeback too
-	unique_lock<mutex> dirty_lock(m_dirty_mutex);
-	m_dirty_condvar.notify_all();
-	dirty_lock.unlock();
+	unique_lock<mutex> journal_lock(m_journal_mutex);
+	m_journal_condvar.notify_all();
+	journal_lock.unlock();
 }
 
 void

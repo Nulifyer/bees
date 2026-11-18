@@ -8,8 +8,13 @@ bees uses checkpoints for persistence to eliminate the IO overhead of a
 transactional data store.  On restart, bees will dedupe any data that
 was added to the filesystem since the last checkpoint.  Checkpoints
 occur every 15 minutes for scan progress, stored in `beescrawl.dat`.
-The hash table trickle-writes to disk at 128KiB/s to `beeshash.dat`,
-but will flush immediately if bees is terminated by SIGTERM.
+Changes to the hash table are appended to a journal, `beeshash.journal`
+(16 bytes per changed entry), before each of those checkpoints, whenever
+65536 changes have accumulated, and when bees is terminated by SIGTERM.
+The hash table file `beeshash.dat` itself is rewritten only when the
+journal has grown to one eighth of the table's size (and to at least
+16MB, or the table's size if that is smaller); at startup the journal
+is applied to the table.
 
 There are no special requirements for bees hash table storage--`.beeshome`
 could be stored on a different btrfs filesystem, ext4, or even CIFS (but

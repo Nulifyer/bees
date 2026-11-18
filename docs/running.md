@@ -51,6 +51,7 @@ There are some runtime configurable options using environment variables:
 
 * BEESHOME: Directory containing bees state files:
 	* beeshash.dat  | persistent hash table.  Must be a multiple of 128KB, and must be created before bees starts.
+	* beeshash.journal | changes to the hash table that are not in beeshash.dat yet.  bees will create this.  It grows to one eighth of the size of beeshash.dat (at least 16MB) and then starts over.  If you delete beeshash.dat, delete this file too.
 	* beescrawl.dat | state of SEARCH_V2 crawlers.  ASCII text.  bees will create this.
 	* beesstats.txt | statistics and performance counters.  ASCII text.  bees will create this.
 * BEESSTATUS: File containing a snapshot of current bees state:  performance

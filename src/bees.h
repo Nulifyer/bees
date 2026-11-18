@@ -15,6 +15,7 @@
 #include "crucible/time.h"
 #include "crucible/task.h"
 
+#include "bees-hash-journal.h"
 #include "bees-settle.h"
 
 #include <atomic>
@@ -66,9 +67,28 @@ const off_t BLOCK_SIZE_HASHTAB_BUCKET = BLOCK_SIZE_MMAP;
 // Extent size for hash table (since the nocow file attribute does not seem to be working today)
 const off_t BLOCK_SIZE_HASHTAB_EXTENT = BLOCK_SIZE_MAX_COMPRESSED_EXTENT;
 
-// Bytes per second we want to flush from hash table
-// Optimistic sustained write rate for SD cards
-const double BEES_FLUSH_RATE = 128 * 1024;
+// Changes to the hash table go to a journal (see bees-hash-journal.h).
+// The table file is rewritten when the journal has reached this fraction of
+// the table's size, then the journal starts over
+const uint64_t BEES_HASH_JOURNAL_FRACTION = 8;
+
+// ...but not before the journal has this many bytes (or as many as the table,
+// if the table is smaller): rewriting a small table for every megabyte of
+// journal would cost more than the journal saves.  A journal of this size
+// (a million changes) is applied in a second or two at startup.
+const uint64_t BEES_HASH_JOURNAL_MIN_SIZE = 16 * 1024 * 1024;
+
+// Write the journal when this many changes are waiting.
+// They are also written before each save of the crawl state and at exit.
+const size_t BEES_HASH_JOURNAL_BATCH = 65536;
+
+// Write the journal when the oldest waiting change is this old (seconds).
+// This is longer than BEES_WRITEBACK_INTERVAL, so while crawl state is being
+// saved the journal goes to disk with it, in one burst.
+const double BEES_HASH_JOURNAL_DELAY = 1800;
+
+// After a failed write of the hash table or its journal, try again after this many seconds
+const double BEES_HASH_WRITE_RETRY = 300;
 
 // Interval between writing crawl state to disk
 const int BEES_WRITEBACK_INTERVAL = 900;
@@ -474,6 +494,11 @@ public:
 	bool		push_front_hash_addr(HashType hash, AddrType addr);
 	bool            flush_dirty_extent(uint64_t extent_index);
 
+	/// Put every change made so far on disk, and return when it is there.
+	/// The crawl state must not be saved before this: it would say
+	/// "scanned" for extents whose hashes a crash can still lose.
+	void		flush();
+
 private:
 	string		m_filename;
 	Fd		m_fd;
@@ -497,7 +522,6 @@ private:
 	uint64_t		m_cells;
 	BeesThread  		m_writeback_thread;
 	BeesThread	        m_prefetch_thread;
-	RateLimiter		m_flush_rate_limit;
 	BeesStringFile		m_stats_file;
 
 	// Prefetch readahead hint
@@ -506,10 +530,31 @@ private:
 	// One worker at a time checks and inserts the hashes of a scanned extent
 	mutex			m_insert_mutex;
 
-	// Mutex/condvar for the writeback thread
-	mutex			m_dirty_mutex;
-	condition_variable	m_dirty_condvar;
-	bool			m_dirty = false;
+	// The journal: changes to the table since beeshash.dat was last written
+	Fd			m_journal_fd;
+	/// End of the last batch in the journal file.  Only the thread holding m_flush_mutex uses it.
+	uint64_t		m_journal_size = 0;
+	/// Write beeshash.dat and start the journal over when the journal file is this large
+	uint64_t		m_journal_limit = 0;
+	/// True while the journal is applied at startup: those changes are in the journal already
+	bool			m_journal_replaying = false;
+	/// The last attempt to write beeshash.dat failed.  Only the thread holding m_flush_mutex uses it.
+	bool			m_table_write_failed = false;
+
+	// Changes not written to the journal file yet, and the writeback thread's orders
+	mutex			m_journal_mutex;
+	condition_variable	m_journal_condvar;
+	vector<bees_hash_journal::Record> m_journal_records;
+	/// Age of the oldest record in m_journal_records
+	Timer			m_journal_timer;
+	/// The journal file has reached its limit
+	bool			m_checkpoint_wanted = false;
+	/// Changes were dropped because the journal could not be written.  They are
+	/// in memory, in extents marked dirty, and only writing beeshash.dat saves them.
+	bool			m_journal_lost = false;
+
+	// One thread at a time writes the journal or beeshash.dat
+	mutex			m_flush_mutex;
 
 	// Mutex/condvar to stop
 	mutex			m_stop_mutex;
@@ -536,7 +581,11 @@ private:
 	void fetch_missing_extent_by_index(uint64_t extent_index);
 	void set_extent_dirty_locked(uint64_t extent_index);
 	bool scanned_block_raced(const ScannedBlock &block);
-	size_t flush_dirty_extents(bool slowly);
+	size_t flush_dirty_extents(size_t &failed_extents, bool stop_early);
+	void journal_open();
+	void journal_add_locked(bees_hash_journal::Op op, HashType hash, AddrType addr);
+	void journal_write_locked(bool sync);
+	void checkpoint_locked(bool stop_early);
 
 	size_t			hash_to_extent_index(HashType ht);
 	unique_lock<mutex>	lock_extent_by_hash(HashType ht);

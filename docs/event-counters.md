@@ -200,6 +200,7 @@ The `hash` event group consists of operations related to the bees hash table.
 
  * `hash_already`: A `(hash, address)` pair was already present in the hash table during a `BeesHashTable::push_random_hash_addr` operation.
  * `hash_bump`: An existing `(hash, address)` pair was moved forward in the hash table by a `BeesHashTable::push_random_hash_addr` operation.
+ * `hash_checkpoint`: The hash table file was brought up to date (all changed extents written) and the journal started over.
  * `hash_collision`: A pair of data blocks was found with identical hashes but different data.
  * `hash_erase`: A `(hash, address)` pair in the hash table was removed because a matching data block could not be found in the filesystem (i.e. the hash table entry is out of date).
  * `hash_erase_miss`: A `(hash, address)` pair was reported missing from the filesystem but no such entry was found in the hash table (i.e. race between scanning threads or pair already evicted).
@@ -209,6 +210,12 @@ The `hash` event group consists of operations related to the bees hash table.
  * `hash_front`: A `(hash, address)` pair was pushed to the front of the list because it matched a duplicate block.
  * `hash_front_already`: A `(hash, address)` pair was pushed to the front of the list because it matched a duplicate block, but the pair was already at the front of the list so no change occurred.
  * `hash_insert`: A `(hash, address)` pair was inserted by `BeesHashTable::push_random_hash_addr`.
+ * `hash_journal_bytes`: Number of bytes written to the hash table journal.
+ * `hash_journal_error`: The hash table journal or the hash table could not be read or written.  The changes stay in memory and the write is tried again.
+ * `hash_journal_out`: A batch of hash table changes was written to the journal.
+ * `hash_journal_records`: Number of hash table changes written to the journal.
+ * `hash_journal_replay`: Number of hash table changes applied from the journal at startup.
+ * `hash_journal_torn`: The journal ended in a batch that was damaged or incomplete (bees was killed or the machine crashed while it was written).  The batch was dropped.
  * `hash_lookup`: The hash table was searched for `(hash, address)` pairs matching a given `hash`.
 
 open

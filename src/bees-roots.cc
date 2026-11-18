@@ -1730,6 +1730,14 @@ BeesRoots::state_save(const bool force)
 
 	lock.unlock();
 
+	// The state we are about to save says that every extent before the
+	// crawl positions was scanned.  The hashes those scans put into the
+	// hash table must be on disk before that statement is: after a crash
+	// the extents would not be scanned again, and data that is only in a
+	// lost part of the hash table is never matched.
+	// This may throw an exception too, with the same result as below.
+	m_ctx->hash_table()->flush();
+
 	// This may throw an exception, so we didn't save the state we thought we did.
 	m_crawl_state_file.write(ofs.str());
 

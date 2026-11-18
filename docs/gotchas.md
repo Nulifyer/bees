@@ -68,13 +68,10 @@ The shutdown procedure performs these steps:
        important bees state to save to disk as it directly impacts
        restart time, so it is done as early as possible
 
-   2.  Hash table is written to disk.  Normally the hash table is
-       trickled back to disk at a rate of about 128KiB per second;
-       however, SIGTERM causes bees to attempt to flush the whole table
-       immediately.  The time spent here depends on the size of RAM, speed
-       of disks, and aggressiveness of competing filesystem workloads.
-       It can trigger `vm.dirty_bytes` limits and block other processes
-       writing to the filesystem for a while.
+   2.  The hash table changes that are not on disk yet are appended
+       to the journal `beeshash.journal`.  This is at most a few megabytes,
+       whatever the size of the hash table.  The table file itself is not
+       written at shutdown; the journal is applied to it at the next start.
 
    3.  The bees process calls `_exit`, which terminates all running
        worker threads, closes and deletes all temporary files.  This

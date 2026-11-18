@@ -54,7 +54,7 @@ dst = 15 /run/bees/ede84fbd-cb59-0c60-9ea7-376fa4984887/data.new/home/builder/li
  * `crawl_transid`: btrfs transid (generation number) tracker and polling thread
  * `status`: the thread that writes the status reports to `$BEESSTATUS`
  * `crawl_writeback`: writes the scanner progress to `beescrawl.dat`
- * `hash_writeback`: trickle-writes the hash table back to `beeshash.dat`
+ * `hash_writeback`: writes hash table changes to `beeshash.journal`, and now and then the hash table to `beeshash.dat`
  * `hash_prefetch`: prefetches the hash table at startup and updates `beesstats.txt` hourly
 
 Most other threads have names that are derived from the current dedupe
