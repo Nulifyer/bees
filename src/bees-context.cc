@@ -364,9 +364,10 @@ BeesContext::dup_extent(const BeesFileRange &src, const shared_ptr<BeesTempFile>
 
 /// Replace the data of bfr with a copy in a new extent, and insert the
 /// copy's hashes.  `scanned` has what the scan of the old extent found for
-/// each block, by file offset.
+/// each block, by file offset.  With rescan_if_raced, scan the copy if
+/// another worker inserted its hashes first.
 void
-BeesContext::rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesHashTable::ScannedBlock> &scanned)
+BeesContext::rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesHashTable::ScannedBlock> &scanned, const bool rescan_if_raced)
 {
 	auto m_ctx = shared_from_this();
 	BEESNOTE("Rewriting bfr " << bfr);
@@ -419,21 +420,55 @@ BeesContext::rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesH
 	}
 	// The same race as at the end of scan_one_extent_once: another worker may have
 	// inserted these hashes since the scan looked them up, because it was scanning
-	// (and maybe copying) the same data at the same time.  Then leave our copy out
-	// of the hash table.  The copy is a new extent, so the crawl scans it in its
-	// next cycle, finds the other worker's copy and dedupes the two.  If we inserted
-	// our hashes now, that scan would find them and take the extent for done.
-	// Unless only a few of the blocks are concerned: then that scan could not
-	// dedupe the copy either, see bees_race_rescan_worthwhile.
+	// (and maybe copying) the same data at the same time.
 	const auto raced_blocks = hash_table->insert_scanned_extent(copied_blocks, false);
 	if (!raced_blocks) {
 		BEESCOUNTADD(scan_reinsert, copied_blocks.size());
-	} else if (bees_race_rescan_worthwhile(raced_blocks, 0, 0, copied_blocks.size())) {
-		BEESCOUNT(scan_race_reinsert);
-	} else {
-		BEESCOUNT(scan_race_ignored);
+		return;
+	}
+	const bool worthwhile = bees_race_rescan_worthwhile(raced_blocks, 0, 0, copied_blocks.size());
+	if (!worthwhile || !rescan_if_raced) {
+		// Too few blocks for a dedupe, or we have been round often enough
+		if (worthwhile) {
+			BEESCOUNT(scan_race_giveup);
+		} else {
+			BEESCOUNT(scan_race_ignored);
+		}
 		hash_table->insert_scanned_extent(copied_blocks, true);
 		BEESCOUNTADD(scan_reinsert, copied_blocks.size());
+		return;
+	}
+
+	// Our copy has a twin.  Scan the copy now, as any other extent of this file:
+	// this time the lookups find the other worker's copy, and ours is deduped
+	// against it.  We can't leave that to the crawl, although the copy is a new
+	// extent and the crawl will come to it: by then our hashes would have to be
+	// in the table or not.  With them the crawl's scan finds them and takes the
+	// extent for done; without them nothing says the crawl's scan will happen
+	// (it drops an extent that, as far as the extent tree shows at that moment,
+	// only bees' own temporary file refers to).
+	BEESCOUNT(scan_race_reinsert);
+	BtrfsExtentWalker copy_ew(bfr.fd(), bfr.begin(), root_fd());
+	for (off_t p = bfr.begin(); p < bfr.end(); ) {
+		copy_ew.seek(p);
+		const Extent copy_e = copy_ew.current();
+		BEESTRACE("scanning rewritten extent " << copy_e);
+		THROW_CHECK2(runtime_error, copy_e, p, copy_e.end() > p);
+		p = copy_e.end();
+		if (BeesAddress(copy_e, copy_e.begin()).is_magic()) {
+			continue;
+		}
+		catch_all([&]() {
+			// Nobody else should be looking at an extent this new, but if somebody is, leave it alone
+			auto extent_mutex = m_extent_locks(copy_e.bytenr());
+			const auto extent_lock = extent_mutex->try_lock(Task::current_task());
+			if (!extent_lock) {
+				BEESCOUNT(scanf_deferred_extent);
+				return;
+			}
+			// One round only: what this scan copies or keeps is inserted whatever has happened since
+			scan_one_extent_once(bfr, copy_e, false);
+		});
 	}
 }
 
@@ -961,7 +996,7 @@ BeesContext::scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, con
 	// Then the copy/rewrites
 	for (const auto &i : copy_list) {
 		if (!force_insert) {
-			rewrite_file_range(i, insert_map);
+			rewrite_file_range(i, insert_map, rescan_if_raced);
 			extent_modified = true;
 		}
 		for (auto p = i.begin(); p < i.end(); p += BLOCK_SIZE_SUMS) {

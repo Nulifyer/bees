@@ -377,9 +377,9 @@ The `scan` event group consists of operations related to scanning incoming data.
  * `scan_lookup`: A hash was looked up in the hash table.
  * `scan_malign`: A block being scanned matched a hash at EOF in the hash table, but the EOF was not aligned to a block boundary and the two blocks did not have the same length.
  * `scan_push_front`: An entry in the hash table matched a duplicate block, so the entry was moved to the head of its LRU list.
- * `scan_race_giveup`: An extent was scanned `BEES_SCAN_RACE_RESCANS` times more because another worker kept inserting its hashes first, and then its hashes were inserted anyway.
+ * `scan_race_giveup`: An extent was scanned `BEES_SCAN_RACE_RESCANS` times more because another worker kept inserting its hashes first, and then its hashes were inserted anyway.  Also counted when that happens to a range that was rewritten during such a scan.
  * `scan_race_ignored`: Another worker inserted some of an extent's hashes after this worker had looked them up, but too few blocks were concerned for a dedupe to be possible, so the extent was not scanned again and its hashes were inserted.
- * `scan_race_reinsert`: The hashes of a range that bees had just rewritten were not inserted into the hash table, because another worker had inserted the same hashes since this worker looked them up.  The rewritten range is a new extent, which is scanned in the next crawl cycle and deduped against the other copy then.
+ * `scan_race_reinsert`: A range that bees had just rewritten (copied to a new extent) was scanned at once, because another worker had inserted the same hashes since this worker looked them up: it had copied the same data at the same time, and the two copies can be deduped.
  * `scan_race_rescan`: An extent was scanned again because another worker, scanning a copy of the same data at the same time, inserted its hashes into the hash table after this worker had looked them up and before it inserted its own.
  * `scan_reinsert`: A copied block's hash and block address was inserted into the hash table.
  * `scan_resolve_hit`: A block address in the hash table was successfully resolved to an open FD and offset pair.

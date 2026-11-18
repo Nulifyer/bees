@@ -900,7 +900,7 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 
 	void scan_one_extent(const BeesFileRange &bfr, const Extent &e);
 	bool scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, bool rescan_if_raced);
-	void rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesHashTable::ScannedBlock> &scanned);
+	void rewrite_file_range(const BeesFileRange &bfr, const map<off_t, BeesHashTable::ScannedBlock> &scanned, bool rescan_if_raced);
 
 public:
 

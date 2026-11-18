@@ -56,10 +56,9 @@
 // bees also inserts hashes when it has rewritten part of an extent (the part
 // of a partly duplicate extent that was not duplicate is copied to a new
 // extent).  Two workers that do this to two copies of the same data make two
-// identical new extents.  The same step guards that insert, but there is no
-// second scan: the worker that comes second inserts nothing, and the crawl,
-// which scans every new extent, finds the first worker's copy when it gets
-// to the second one.
+// identical new extents.  The same step guards that insert: the worker that
+// comes second inserts nothing and scans its new extent, which is deduped
+// against the first worker's.
 //
 // The templates need no hash table and no btrfs, so test/insert_race.cc can
 // test them.
