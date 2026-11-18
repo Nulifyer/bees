@@ -2545,7 +2545,10 @@ BeesRoots::open_root_ino_nocache(uint64_t root, uint64_t ino)
 			if (errno == ENOENT) {
 				BEESCOUNT(open_fail_enoent);
 			} else {
-				BEESLOGWARN("Could not open path '" << file_path << "' at root " << root << " " << name_fd(root_fd) << ": " << strerror(errno));
+				// File names only at debug level, so that a log at a lower level has none
+				const auto open_errno = errno;
+				BEESLOGWARN("Could not open a path of root " << root << " ino " << ino << ": " << strerror(open_errno));
+				BEESLOGDEBUG("Could not open path '" << file_path << "' at root " << root << " " << name_fd(root_fd) << ": " << strerror(open_errno));
 				BEESCOUNT(open_fail_error);
 			}
 			continue;
@@ -2554,7 +2557,8 @@ BeesRoots::open_root_ino_nocache(uint64_t root, uint64_t ino)
 		// Correct inode?
 		Stat file_stat(rv);
 		if (file_stat.st_ino != ino) {
-			BEESLOGWARN("Opening " << name_fd(root_fd) << "/" << file_path << " found wrong inode " << file_stat.st_ino << " instead of " << ino);
+			BEESLOGWARN("Opening a path of root " << root << " found wrong inode " << file_stat.st_ino << " instead of " << ino);
+			BEESLOGDEBUG("Opening " << name_fd(root_fd) << "/" << file_path << " found wrong inode " << file_stat.st_ino << " instead of " << ino);
 			rv = Fd();
 			BEESCOUNT(open_wrong_ino);
 			break;
@@ -2563,7 +2567,8 @@ BeesRoots::open_root_ino_nocache(uint64_t root, uint64_t ino)
 		// Correct root?
 		auto file_root = btrfs_get_root_id(rv);
 		if (file_root != root) {
-			BEESLOGWARN("Opening " << name_fd(root_fd) << "/" << file_path << " found wrong root " << file_root << " instead of " << root);
+			BEESLOGWARN("Opening a path of ino " << ino << " found wrong root " << file_root << " instead of " << root);
+			BEESLOGDEBUG("Opening " << name_fd(root_fd) << "/" << file_path << " found wrong root " << file_root << " instead of " << root);
 			rv = Fd();
 			BEESCOUNT(open_wrong_root);
 			break;
@@ -2572,7 +2577,8 @@ BeesRoots::open_root_ino_nocache(uint64_t root, uint64_t ino)
 		// Same filesystem?
 		Stat root_stat(root_fd);
 		if (root_stat.st_dev != file_stat.st_dev) {
-			BEESLOGWARN("Opening root " << name_fd(root_fd) << " path " << file_path << " found path st_dev " << file_stat.st_dev << " but root st_dev is " << root_stat.st_dev);
+			BEESLOGWARN("Opening a path of root " << root << " ino " << ino << " found path st_dev " << file_stat.st_dev << " but root st_dev is " << root_stat.st_dev);
+			BEESLOGDEBUG("Opening root " << name_fd(root_fd) << " path " << file_path << " found path st_dev " << file_stat.st_dev << " but root st_dev is " << root_stat.st_dev);
 			rv = Fd();
 			BEESCOUNT(open_wrong_dev);
 			break;
