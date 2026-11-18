@@ -509,9 +509,6 @@ BeesContext::scan_one_extent(const BeesFileRange &bfr, const Extent &e)
 	}
 	lock_seen.unlock();
 
-	// OK we need to read extent now
-	bees_readahead(bfr.fd(), bfr.begin(), bfr.size());
-
 	map<off_t, pair<BeesHash, BeesAddress>> insert_map;
 	set<off_t> dedupe_set;
 	set<off_t> zero_set;

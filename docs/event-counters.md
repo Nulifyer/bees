@@ -287,14 +287,8 @@ The `progress` event group consists of events related to progress estimation.
 readahead
 ---------
 
-The `readahead` event group consists of events related to data prefetching (formerly calls to `posix_fadvise` or `readahead`, but now emulated in userspace).
+The `readahead` event group consists of events related to data prefetching.  bees no longer prefetches file data itself (the kernel's readahead does that); what is left is giving pages back.
 
- * `readahead_bytes`: Number of bytes prefetched.
- * `readahead_count`: Number of read calls.
- * `readahead_clear`: Number of times the duplicate read cache was cleared.
- * `readahead_fail`: Number of read errors during prefetch.
- * `readahead_ms`: Total time spent emulating readahead in user-space (kernel readahead is not measured).
- * `readahead_skip`: Number of times a duplicate read was identified in the cache and skipped.
  * `readahead_unread_ms`: Total time spent running `posix_fadvise(..., POSIX_FADV_DONTNEED)`.
 
 replacedst

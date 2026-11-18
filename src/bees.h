@@ -127,9 +127,6 @@ const double BEES_SETTLE_PATIENCE = 10.0;
 // their files to stop changing.  Extents beyond that are scanned without waiting.
 const size_t BEES_SETTLE_DEFER_LIMIT = 1000;
 
-// Workaround for silly dedupe / ineffective readahead behavior
-const size_t BEES_READAHEAD_SIZE = 1024 * 1024;
-
 // Flags
 const int FLAGS_OPEN_COMMON   = O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOATIME | O_LARGEFILE | O_NOCTTY;
 const int FLAGS_OPEN_DIR      = FLAGS_OPEN_COMMON | O_RDONLY | O_DIRECTORY;  ///< Open a directory read-only.
@@ -962,8 +959,6 @@ extern const char *BEES_USAGE;
 extern const char *BEES_VERSION;
 extern thread_local default_random_engine bees_generator;
 string pretty(double d);
-void bees_readahead(int fd, off_t offset, size_t size);
-void bees_readahead_pair(int fd, off_t offset, size_t size, int fd2, off_t offset2, size_t size2);
 void bees_unreadahead(int fd, off_t offset, size_t size);
 void bees_throttle(double time_used, const char *context);
 string format_time(time_t t);
