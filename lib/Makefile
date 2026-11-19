@@ -8,6 +8,7 @@ CRUCIBLE_OBJS = \
 	city.o \
 	cleanup.o \
 	crc64.o \
+	csum.o \
 	error.o \
 	extentwalker.o \
 	fd.o \
