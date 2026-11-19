@@ -38,5 +38,6 @@ compression method or not compress the data (patches welcome!).
 over with a new full-filesystem scan; however, this feature has not been
 implemented yet.
 
-* btrfs maintains csums of data blocks which bees could use to improve
-scan speeds, but bees doesn't use them yet.
+* btrfs maintains csums of data blocks.  With `--scan-csums` bees uses
+them to look up uncompressed extents without reading them; compressed
+extents are still read, because their csums are of the compressed bytes.

@@ -147,6 +147,46 @@ punch holes in them, hash them or dedupe them.  Extents that contain
 written zeros are not preallocated extents, and are still handled as
 usual.
 
+* `--scan-csums`
+
+ Find candidates for dedupe by the checksums btrfs already stores for
+each data block, instead of reading every block.  **Off by default.**
+
+ Without this option bees reads and hashes every new block to look it up
+in the hash table.  With it, the hash table's keys are made from the
+block's btrfs data checksum (crc32c, or xxhash64 on a filesystem made
+with `mkfs.btrfs --csum xxhash`).  For an uncompressed extent bees fetches
+the checksums of all its blocks from the csum tree in one search and
+looks them up without reading the data; an extent with nothing in common
+with the table is never read.  A block is read only when its key matches
+an entry, and then it is compared byte for byte as always (the kernel's
+dedupe compares them again), so a checksum collision costs a read, never
+data.
+
+  * Compressed extents are still read: btrfs checksums the compressed
+    bytes, so bees computes the same checksum of the uncompressed data
+    itself.  A compressed copy and an uncompressed copy of the same data
+    still find each other.  Most compressible data on a filesystem
+    mounted with `compress` is compressed, so the saving is mostly in
+    data that does not compress (media, archives, packages, disk images).
+  * Blocks whose checksum is that of a block of zeros are read (bees
+    punches holes for zeros), and so are blocks without a checksum.
+    `nodatasum`/`nodatacow` files are not scanned at all, with or without
+    the option.
+  * Filesystems with `sha256` or `blake2` checksums, or a sector size other
+    than 4K: the option logs a warning and bees reads every block.
+  * crc32c has 32 bits.  In a large hash table more keys collide, and
+    each collision costs one more lookup and read of a block (counted in
+    `hash_collision`).
+
+ The hash table's keys depend on the option, so turning it on or off
+starts the hash table and the crawl over (a full scan, as on the first
+run): bees records how the keys were made in `$BEESHOME/beeshash.type`
+and resets `beeshash.dat`, `beeshash.journal` and `beescrawl.dat` when
+that changes.  bees versions without the option don't know the file;
+running one of them on a table made with the option finds few
+duplicates until the table is reset by hand.
+
 ## Workarounds
 
 * `--workaround-btrfs-send` or `-a`

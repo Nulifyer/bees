@@ -736,6 +736,7 @@ bees_main(int argc, char *argv[])
 	bool workaround_btrfs_send = false;
 	bool keep_prealloc = false;
 	bool hash_mlock = true;
+	bool scan_csums = false;
 	double settle_delay = 0;
 	double status_interval = BEES_STATUS_INTERVAL;
 	BeesRoots::ScanMode root_scan_mode = BeesRoots::SCAN_MODE_EXTENT;
@@ -748,6 +749,7 @@ bees_main(int argc, char *argv[])
 		BEES_OPT_SETTLE_DELAY,
 		BEES_OPT_STATUS_INTERVAL,
 		BEES_OPT_NO_MLOCK,
+		BEES_OPT_SCAN_CSUMS,
 	};
 	static const struct option long_options[] = {
 		{ .name = "thread-factor",         .has_arg = required_argument, .val = 'C' },
@@ -756,6 +758,7 @@ bees_main(int argc, char *argv[])
 		{ .name = "settle-delay",          .has_arg = required_argument, .val = BEES_OPT_SETTLE_DELAY },
 		{ .name = "status-interval",       .has_arg = required_argument, .val = BEES_OPT_STATUS_INTERVAL },
 		{ .name = "no-mlock",              .has_arg = no_argument,       .val = BEES_OPT_NO_MLOCK },
+		{ .name = "scan-csums",            .has_arg = no_argument,       .val = BEES_OPT_SCAN_CSUMS },
 		{ .name = "thread-min",            .has_arg = required_argument, .val = 'G' },
 		{ .name = "strip-paths",           .has_arg = no_argument,       .val = 'P' },
 		{ .name = "no-timestamps",         .has_arg = no_argument,       .val = 'T' },
@@ -820,6 +823,9 @@ bees_main(int argc, char *argv[])
 				break;
 			case BEES_OPT_NO_MLOCK:
 				hash_mlock = false;
+				break;
+			case BEES_OPT_SCAN_CSUMS:
+				scan_csums = true;
 				break;
 			case 'G':
 				thread_min = stoul(optarg);
@@ -912,6 +918,10 @@ bees_main(int argc, char *argv[])
 	string root_path = argv[optind++];
 	BEESLOGNOTICE("setting root path to '" << root_path << "'");
 	bc->set_root_path(root_path);
+
+	// Hash table keys from btrfs csums, or from bees' own hash.  Before anything opens
+	// the hash table or the crawl state: they start over if the keys were made the other way.
+	bc->set_scan_csums(scan_csums);
 
 	// Set path prefix
 	if (use_relative_paths) {

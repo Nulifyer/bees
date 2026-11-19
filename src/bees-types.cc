@@ -909,6 +909,20 @@ BeesBlockData::data() const
 	return m_data;
 }
 
+static bees_csum::Kind s_hash_kind = bees_csum::KIND_CRC64;
+
+void
+BeesBlockData::hash_kind(const bees_csum::Kind kind)
+{
+	s_hash_kind = kind;
+}
+
+bees_csum::Kind
+BeesBlockData::hash_kind()
+{
+	return s_hash_kind;
+}
+
 BeesHash
 BeesBlockData::hash() const
 {
@@ -916,12 +930,25 @@ BeesBlockData::hash() const
 		// We can only dedupe unaligned EOF blocks against other unaligned EOF blocks,
 		// so we do NOT round up to a full sum block size.
 		const Blob &blob = data();
-		m_hash = BeesHash(blob.data(), blob.size());
+		if (s_hash_kind == bees_csum::KIND_CRC64) {
+			m_hash = BeesHash(blob.data(), blob.size());
+		} else {
+			// The key the block's btrfs csum gives (the length is part of it, see bees-csum.h)
+			m_hash = bees_csum::key_from_data(s_hash_kind, blob.data(), blob.size());
+		}
 		m_hash_done = true;
 		BEESCOUNT(block_hash);
 	}
 
 	return m_hash;
+}
+
+BeesBlockData &
+BeesBlockData::hash(const BeesHash h)
+{
+	m_hash = h;
+	m_hash_done = true;
+	return *this;
 }
 
 bool

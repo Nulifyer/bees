@@ -213,6 +213,7 @@ The `hash` event group consists of operations related to the bees hash table.
  * `hash_journal_bytes`: Number of bytes written to the hash table journal.
  * `hash_journal_error`: The hash table journal or the hash table could not be read or written.  The changes stay in memory and the write is tried again.
  * `hash_journal_out`: A batch of hash table changes was written to the journal.
+ * `hash_kind_reset`: The hash table's keys had been made another way than this run makes them (`--scan-csums` was turned on or off, see `beeshash.type`), so the hash table and the crawl state were started over.  Also counted when `beeshash.type` is written for the first time.
  * `hash_journal_records`: Number of hash table changes written to the journal.
  * `hash_journal_replay`: Number of hash table changes applied from the journal at startup.
  * `hash_journal_torn`: The journal ended in a batch that was damaged or incomplete (bees was killed or the machine crashed while it was written).  The batch was dropped.
@@ -362,6 +363,12 @@ The `scan` event group consists of operations related to scanning incoming data.
  * `scan_blacklisted`: A blacklisted extent was passed to `scan_forward` and dropped.
  * `scan_block`: A block of data was scanned.
  * `scan_compressed_no_dedup`: An extent that was compressed contained non-zero, non-duplicate data.
+ * `scan_csum_block`: With `--scan-csums`, a block's hash table key was made from its btrfs csum, without reading the block.  The block is read later only if the key matches a hash table entry.
+ * `scan_csum_compressed`: With `--scan-csums`, a compressed extent was scanned by reading it: its csums are of the compressed bytes.
+ * `scan_csum_error`: With `--scan-csums`, fetching the csums of an extent failed, and the extent was read instead.
+ * `scan_csum_extent`: With `--scan-csums`, the csums of an uncompressed extent were fetched from the csum tree.
+ * `scan_csum_ms`: Total time spent fetching csums from the csum tree.
+ * `scan_csum_read`: With `--scan-csums`, a block of an uncompressed extent was read after all: the csum tree had no csum for it, or its csum is that of a block of zeros (zero blocks are checked and punched out, not inserted).
  * `scan_dup_block`: Number of duplicate block references deduped.
  * `scan_dup_hit`: A pair of duplicate block ranges was found.
  * `scan_dup_miss`: A pair of duplicate blocks was found in the hash table but not in the filesystem.

@@ -619,6 +619,36 @@ BeesContext::scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, con
 	list<pair<BeesHash, BeesAddress>> front_hash_list;
 	list<uint64_t> invalidate_addr_list;
 
+	// --scan-csums: the csums btrfs stores for an uncompressed extent are the csums of
+	// its data, and give each block's key without reading it.  Compressed extents are
+	// read: their csums are of the compressed bytes.
+	const auto csum_kind = m_ctx->csum_kind();
+	unique_ptr<bees_csum::ExtentSums> extent_sums;
+	if (csum_kind != bees_csum::KIND_CRC64 && !(e.flags() & FIEMAP_EXTENT_ENCODED)) {
+		BEESNOTE("fetching csums of " << e);
+		BEESTRACE("fetching csums of " << e);
+		Timer csum_timer;
+		static thread_local unique_ptr<BtrfsCsumTreeFetcher> tl_csum_fetcher;
+		if (!tl_csum_fetcher) {
+			tl_csum_fetcher.reset(new BtrfsCsumTreeFetcher(m_ctx->root_fd()));
+		}
+		extent_sums.reset(new bees_csum::ExtentSums(csum_kind, e.physical(), block_count));
+		try {
+			tl_csum_fetcher->get_sums(e.physical(), block_count, [&](uint64_t logical, const uint8_t *buf, size_t bytes) {
+				extent_sums->add(logical, buf, bytes);
+			});
+		} catch (const exception &ex) {
+			// Read the extent instead
+			BEESLOGDEBUG("fetching csums of " << e << ": " << ex.what());
+			BEESCOUNT(scan_csum_error);
+			extent_sums.reset();
+		}
+		BEESCOUNT(scan_csum_extent);
+		BEESCOUNTADD(scan_csum_ms, csum_timer.age() * 1000);
+	} else if (csum_kind != bees_csum::KIND_CRC64) {
+		BEESCOUNT(scan_csum_compressed);
+	}
+
 	off_t next_p = e.begin();
 	for (off_t p = e.begin(); p < e.end(); p += BLOCK_SIZE_SUMS) {
 
@@ -635,13 +665,26 @@ BeesContext::scan_one_extent_once(const BeesFileRange &bfr, const Extent &e, con
 
 		BEESTRACE("scan bbd " << bbd);
 
-		// Calculate the hash first because it lets us shortcut on is_data_zero
-		BEESNOTE("scan hash " << bbd);
-		const BeesHash hash = bbd.hash();
+		// A block with a csum gets its key from it and is not read, unless the csum is
+		// that of a block of zeros: zeros are not inserted but punched out, so they are
+		// read and checked.  A block without a csum is read.
+		bool data_is_zero = false;
+		if (extent_sums && extent_sums->have(bar_p) && !bees_csum::is_zero_block_csum(csum_kind, extent_sums->sum(bar_p))) {
+			bbd.hash(bees_csum::key_from_csum(csum_kind, extent_sums->sum(bar_p), bbd.size()));
+			BEESCOUNT(scan_csum_block);
+		} else {
+			if (extent_sums) {
+				BEESCOUNT(scan_csum_read);
+			}
+			// Calculate the hash first because it lets us shortcut on is_data_zero
+			BEESNOTE("scan hash " << bbd);
+			bbd.hash();
 
-		// Weed out zero blocks
-		BEESNOTE("is_data_zero " << bbd);
-		const bool data_is_zero = bbd.is_data_zero();
+			// Weed out zero blocks
+			BEESNOTE("is_data_zero " << bbd);
+			data_is_zero = bbd.is_data_zero();
+		}
+		const BeesHash hash = bbd.hash();
 		if (data_is_zero) {
 			bar.at(bar_p) = '0';
 			zero_set.insert(p);
@@ -1551,6 +1594,79 @@ BeesContext::set_hash_mlock(const bool do_mlock)
 	} else {
 		BEESLOGINFO("not locking hash table in memory");
 	}
+}
+
+// Zero the hash table file in place (keeping its size), drop its journal and the crawl state
+static
+void
+bees_reset_hash_table_and_crawl(const Fd &home_fd)
+{
+	BEESNOTE("starting the hash table and the crawl over");
+	for (const char *name : { "beeshash.journal", "beescrawl.dat" }) {
+		if (unlinkat(home_fd, name, 0) && errno != ENOENT) {
+			THROW_ERRNO("unlinkat: " << name_fd(home_fd) << "/" << name);
+		}
+	}
+	Fd table_fd(openat(home_fd, "beeshash.dat", O_RDWR | O_CLOEXEC | O_NOFOLLOW));
+	if (!!table_fd) {
+		Stat st(table_fd);
+		DIE_IF_NON_ZERO(ftruncate(table_fd, 0));
+		DIE_IF_NON_ZERO(ftruncate(table_fd, st.st_size));
+		DIE_IF_NON_ZERO(fsync(table_fd));
+	}
+	// The table, the journal, the crawl state and beeshash.type have to reach the disk in that order
+	DIE_IF_NON_ZERO(syncfs(home_fd));
+}
+
+void
+BeesContext::set_scan_csums(const bool scan_csums)
+{
+	BEESNOTE("checking how the hash table keys were made");
+	auto want = bees_csum::KIND_CRC64;
+	if (scan_csums) {
+		BtrfsIoctlFsInfoArgs fsi;
+		fsi.do_ioctl(root_fd());
+		auto sum_size = fsi.csum_size();
+		if (fsi.csum_type() == bees_csum::BTRFS_CRC32C && sum_size == 0) {
+			// Older kernels don't fill in the size
+			sum_size = 4;
+		}
+		want = bees_csum::kind_for_fs(fsi.csum_type(), sum_size, fsi.sectorsize);
+		if (want == bees_csum::KIND_CRC64) {
+			BEESLOGWARN("--scan-csums: not done for csum type " << fsi.csum_type() << " with sector size " << fsi.sectorsize << ", every block is read as without the option");
+		} else {
+			BEESLOGINFO("scanning with btrfs csums (" << bees_csum::kind_name(want) << ")");
+		}
+	}
+	// Without the option and without beeshash.type nothing changes: every table made
+	// before the file existed was keyed by bees' own hash
+	const char *const type_name = "beeshash.type";
+	Fd type_fd(openat(home_fd(), type_name, FLAGS_OPEN_FILE));
+	if (!type_fd && want == bees_csum::KIND_CRC64) {
+		m_csum_kind = want;
+		BeesBlockData::hash_kind(want);
+		return;
+	}
+	type_fd = Fd();
+	BeesStringFile type_file(home_fd(), type_name, 4096);
+	auto have = bees_csum::KIND_UNKNOWN;
+	catch_all([&]() {
+		// An empty or unreadable file throws: start over as for an unknown kind
+		have = bees_csum::kind_from_text(type_file.read());
+	});
+	if (have != want) {
+		if (faccessat(home_fd(), "beescrawl.dat", F_OK, 0) == 0) {
+			BEESLOGWARN("The hash table's keys were made from " << bees_csum::kind_name(have) << ", now from " << bees_csum::kind_name(want) << ": the hash table and the crawl start over");
+		} else {
+			BEESLOGINFO("hash table keys from " << bees_csum::kind_name(want) << ", no crawl state yet");
+		}
+		bees_reset_hash_table_and_crawl(home_fd());
+		BEESCOUNT(hash_kind_reset);
+		type_file.write(string(bees_csum::kind_name(want)) + "\n");
+		DIE_IF_NON_ZERO(syncfs(home_fd()));
+	}
+	m_csum_kind = want;
+	BeesBlockData::hash_kind(want);
 }
 
 void

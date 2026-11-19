@@ -25,6 +25,8 @@ Filesystem tree traversal options:
 Extent handling options:
         --keep-prealloc   Leave preallocated extents alone
                           (default: replace them with holes)
+        --scan-csums      Look up uncompressed data by its btrfs csums
+                          instead of reading it (default: read every block)
 
 Workarounds:
     -a, --workaround-btrfs-send    Workaround for btrfs send

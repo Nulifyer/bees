@@ -15,6 +15,7 @@
 #include "crucible/time.h"
 #include "crucible/task.h"
 
+#include "bees-csum.h"
 #include "bees-hash-journal.h"
 #include "bees-settle.h"
 
@@ -800,6 +801,13 @@ public:
 
 	// Setters
 	BeesBlockData &addr(const BeesAddress &a);
+	/// The block's hash table key, known without reading the block (from its btrfs csum)
+	BeesBlockData &hash(BeesHash h);
+
+	/// What hash() makes keys from: bees' CRC64 of the data (the default), or with
+	/// --scan-csums the btrfs csum of the data.  Set once at startup.
+	static void hash_kind(bees_csum::Kind kind);
+	static bees_csum::Kind hash_kind();
 
 friend ostream &operator<<(ostream &, const BeesBlockData &);
 };
@@ -893,6 +901,8 @@ class BeesContext : public enable_shared_from_this<BeesContext> {
 
 	bool						m_keep_prealloc = false;
 	bool						m_hash_mlock = true;
+	/// --scan-csums: what the hash table keys are made from (KIND_CRC64 without the option)
+	bees_csum::Kind					m_csum_kind = bees_csum::KIND_CRC64;
 
 	void set_root_fd(Fd fd);
 
@@ -908,6 +918,10 @@ public:
 	void set_keep_prealloc(bool keep);
 	void set_hash_mlock(bool do_mlock);
 	bool hash_mlock() const { return m_hash_mlock; }
+	/// --scan-csums.  Call before the hash table and the crawlers are created:
+	/// if the table's keys were made the other way, they and the crawl start over.
+	void set_scan_csums(bool scan_csums);
+	bees_csum::Kind csum_kind() const { return m_csum_kind; }
 	void set_status_interval(double seconds);
 
 	Fd root_fd() const { return m_root_fd; }
